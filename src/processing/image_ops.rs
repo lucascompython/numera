@@ -1,6 +1,6 @@
 use ab_glyph::{FontRef, PxScale};
 use image::metadata::Orientation;
-use image::{DynamicImage, GenericImageView, ImageDecoder, ImageReader, RgbaImage};
+use image::{DynamicImage, GenericImageView, ImageDecoder, ImageReader, RgbImage, RgbaImage};
 use imageproc::drawing::{draw_text_mut, text_size};
 use memmap2::MmapOptions;
 use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
@@ -104,12 +104,16 @@ fn decode_image_from_bytes(
     raw: &[u8],
     preview_max_side: Option<u32>,
 ) -> Result<DynamicImage, String> {
-    let orientation = read_image_orientation_from_bytes(raw);
-
-    if let Some(mut img) = decode_with_turbojpeg(raw, preview_max_side) {
-        img.apply_orientation(orientation);
-        return Ok(img);
-    }
+    let jpeg_orientation = if is_jpeg(raw) {
+        let orientation = read_image_orientation_from_bytes(raw);
+        if let Some(mut img) = decode_with_turbojpeg(raw, preview_max_side) {
+            img.apply_orientation(orientation);
+            return Ok(img);
+        }
+        orientation
+    } else {
+        Orientation::NoTransforms
+    };
 
     // fallback to generic image decoder if turbojpeg fails or format is non-JPEG.
     let mut decoder = ImageReader::new(Cursor::new(raw))
@@ -118,11 +122,15 @@ fn decode_image_from_bytes(
         .into_decoder()
         .map_err(|e| format!("Failed to create decoder {}: {e}", path.display()))?;
 
-    let orientation = decoder.orientation().unwrap_or(orientation);
+    let orientation = decoder.orientation().unwrap_or(jpeg_orientation);
     let mut img = DynamicImage::from_decoder(decoder)
         .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
     img.apply_orientation(orientation);
     Ok(img)
+}
+
+fn is_jpeg(raw: &[u8]) -> bool {
+    raw.starts_with(&[0xFF, 0xD8, 0xFF])
 }
 
 fn decode_with_turbojpeg(raw: &[u8], preview_max_side: Option<u32>) -> Option<DynamicImage> {
@@ -149,9 +157,9 @@ fn decode_with_turbojpeg(raw: &[u8], preview_max_side: Option<u32>) -> Option<Dy
         }
     }
 
-    let decoded = turbojpeg::decompress(raw, turbojpeg::PixelFormat::RGBA).ok()?;
-    let rgba = RgbaImage::from_raw(decoded.width as u32, decoded.height as u32, decoded.pixels)?;
-    Some(DynamicImage::ImageRgba8(rgba))
+    let decoded = turbojpeg::decompress(raw, turbojpeg::PixelFormat::RGB).ok()?;
+    let rgb = RgbImage::from_raw(decoded.width as u32, decoded.height as u32, decoded.pixels)?;
+    Some(DynamicImage::ImageRgb8(rgb))
 }
 
 fn select_scaling_factor(
@@ -206,19 +214,32 @@ fn read_image_orientation_from_bytes(raw: &[u8]) -> Orientation {
 }
 
 pub fn save_jpeg(img: &DynamicImage, path: &Path, quality: u8) -> Result<(), String> {
-    let rgb = img.to_rgb8();
-    let (w, h) = (rgb.width(), rgb.height());
-    let turbo_img = turbojpeg::Image {
-        pixels: rgb.as_raw().as_slice(),
-        width: w as usize,
-        pitch: w as usize * 3,
-        height: h as usize,
-        format: turbojpeg::PixelFormat::RGB,
-    };
-    let jpeg_data = turbojpeg::compress(turbo_img, quality as i32, turbojpeg::Subsamp::Sub2x2)
-        .map_err(|e| format!("Failed to encode JPEG {}: {e}", path.display()))?;
+    let jpeg_data = if let Some(rgb) = img.as_rgb8() {
+        compress_rgb_jpeg(rgb.as_raw(), rgb.width(), rgb.height(), quality)
+    } else {
+        let rgb = img.to_rgb8();
+        compress_rgb_jpeg(rgb.as_raw(), rgb.width(), rgb.height(), quality)
+    }
+    .map_err(|e| format!("Failed to encode JPEG {}: {e}", path.display()))?;
+
     std::fs::write(path, &*jpeg_data)
         .map_err(|e| format!("Failed to write JPEG {}: {e}", path.display()))
+}
+
+fn compress_rgb_jpeg(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> turbojpeg::Result<turbojpeg::OwnedBuf> {
+    let turbo_img = turbojpeg::Image {
+        pixels,
+        width: width as usize,
+        pitch: width as usize * 3,
+        height: height as usize,
+        format: turbojpeg::PixelFormat::RGB,
+    };
+    turbojpeg::compress(turbo_img, quality as i32, turbojpeg::Subsamp::Sub2x2)
 }
 
 /// Rotate the image clockwise.
@@ -419,11 +440,18 @@ pub fn load_watermark_stamp(
         rgba = image::imageops::resize(&rgba, new_w, new_h, image::imageops::FilterType::Triangle);
     }
 
-    if rotation != Rotation::None {
-        rgba = rotate_image(&DynamicImage::ImageRgba8(rgba), rotation).to_rgba8();
-    }
+    rgba = rotate_rgba_image(rgba, rotation);
 
     Ok(rgba)
+}
+
+fn rotate_rgba_image(img: RgbaImage, rotation: Rotation) -> RgbaImage {
+    match rotation {
+        Rotation::None => img,
+        Rotation::Cw90 => image::imageops::rotate90(&img),
+        Rotation::Cw180 => image::imageops::rotate180(&img),
+        Rotation::Cw270 => image::imageops::rotate270(&img),
+    }
 }
 
 /// Overlay text onto the image, returning a new `DynamicImage`.
@@ -504,21 +532,18 @@ pub fn export_images_to_pdf(
 
     // Pages + content + images
     for (i, img) in images.iter().enumerate() {
-        let rgb = img.to_rgb8();
-        let (w, h) = (rgb.width(), rgb.height());
+        let (w, h, jpeg_buf) = if let Some(rgb) = img.as_rgb8() {
+            let jpeg_buf = compress_rgb_jpeg(rgb.as_raw(), rgb.width(), rgb.height(), quality)
+                .map_err(|e| format!("Failed to encode image for PDF: {e}"))?;
+            (rgb.width(), rgb.height(), jpeg_buf)
+        } else {
+            let rgb = img.to_rgb8();
+            let jpeg_buf = compress_rgb_jpeg(rgb.as_raw(), rgb.width(), rgb.height(), quality)
+                .map_err(|e| format!("Failed to encode image for PDF: {e}"))?;
+            (rgb.width(), rgb.height(), jpeg_buf)
+        };
         let w_pt = w as f32 * 72.0 / dpi;
         let h_pt = h as f32 * 72.0 / dpi;
-
-        // Encode as JPEG for the PDF using turbojpeg
-        let turbo_img = turbojpeg::Image {
-            pixels: rgb.as_raw().as_slice(),
-            width: w as usize,
-            pitch: w as usize * 3,
-            height: h as usize,
-            format: turbojpeg::PixelFormat::RGB,
-        };
-        let jpeg_buf = turbojpeg::compress(turbo_img, quality as i32, turbojpeg::Subsamp::Sub2x2)
-            .map_err(|e| format!("Failed to encode image for PDF: {e}"))?;
 
         // Image XObject
         let image_name = format!("Im{i}");

@@ -256,12 +256,11 @@ fn apply_effects_internal(
 
     // Apply text overlay using cached stamp when possible
     if let Some(ref text_config) = config.text_overlay {
-        let effective = text_config.clone();
         if let Some(stamp) = shared_text_stamp {
-            img = image_ops::overlay_text_with_stamp(img, &effective, stamp);
+            img = image_ops::overlay_text_with_stamp(img, text_config, stamp);
         } else {
-            let stamp = image_ops::render_text_stamp(&effective, filename);
-            img = image_ops::overlay_text_with_stamp(img, &effective, &stamp);
+            let stamp = image_ops::render_text_stamp(text_config, filename);
+            img = image_ops::overlay_text_with_stamp(img, text_config, &stamp);
         }
     }
 
