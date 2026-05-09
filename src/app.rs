@@ -7,6 +7,7 @@ use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerSta
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::progress::Progress;
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 use gpui_component::select::{SelectEvent, SelectItem, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
@@ -121,6 +122,7 @@ pub struct App {
     format_select: Entity<FormatSelectState>,
     rotation_select: Entity<RotationSelectState>,
     watermark_rotation_select: Entity<WatermarkRotationSelectState>,
+    settings_scroll_handle: ScrollHandle,
     position_select: Entity<PositionSelectState>,
     watermark_position_select: Entity<PositionSelectState>,
     text_input: Entity<InputState>,
@@ -521,6 +523,7 @@ impl App {
             format_select,
             rotation_select,
             watermark_rotation_select,
+            settings_scroll_handle: ScrollHandle::new(),
             position_select,
             watermark_position_select,
             text_input,
@@ -1616,8 +1619,23 @@ impl App {
             .border_l_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
-            .overflow_y_scrollbar()
-            .child(settings_col)
+            .relative()
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("settings-scroll-area")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.settings_scroll_handle)
+                    .child(settings_col),
+            )
+            .child(
+                div().absolute().top_0().right_0().bottom_0().child(
+                    Scrollbar::vertical(&self.settings_scroll_handle)
+                        .id("settings-scrollbar")
+                        .scrollbar_show(ScrollbarShow::Always),
+                ),
+            )
     }
 }
 
