@@ -9,6 +9,8 @@ Created using the following [xtask-template](https://github.com/lucascompython/x
 - Able to convert images in batch to pdf/jpg
 - Able to add text to the images (e.g. automatically add file name in the corner, useful for printing and selling posters)
 - Able to rotate the images
+- Poster options for 33x66cm centered crop/resize and optional white border margin
+- Optional PNG/JPEG image watermark with position, rotation, opacity, and size controls
 - Numbering mode for fast per-image number tagging
 - OCR-based number suggestions
 - Sorting mode to quickly sort photos into subfolders based on their name

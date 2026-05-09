@@ -1,6 +1,6 @@
 use ab_glyph::{FontRef, PxScale};
 use image::metadata::Orientation;
-use image::{DynamicImage, ImageDecoder, ImageReader, RgbaImage};
+use image::{DynamicImage, GenericImageView, ImageDecoder, ImageReader, RgbaImage};
 use imageproc::drawing::{draw_text_mut, text_size};
 use memmap2::MmapOptions;
 use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
@@ -237,26 +237,40 @@ pub fn rotate_image(img: &DynamicImage, rotation: Rotation) -> DynamicImage {
 /// Returns the stamp image along with its dimensions.
 pub fn render_text_stamp(config: &TextOverlayConfig, filename: &str) -> RgbaImage {
     let text = config.text_template.replace("{filename}", filename);
+    render_custom_text_stamp(
+        &text,
+        config.font_size,
+        config.color,
+        config.color.a as f32 / 255.0,
+        true,
+    )
+}
+
+pub fn render_custom_text_stamp(
+    text: &str,
+    font_size: f32,
+    color: TextColor,
+    opacity: f32,
+    shadow: bool,
+) -> RgbaImage {
     let font = FontRef::try_from_slice(EMBEDDED_FONT).expect("embedded font is valid");
-    let scale = PxScale::from(config.font_size);
-    let (tw, th) = text_size(scale, &font, &text);
+    let scale = PxScale::from(font_size);
+    let (tw, th) = text_size(scale, &font, text);
 
     // Create a transparent buffer big enough for text + shadow offset
     let buf_w = tw + 2;
     let buf_h = th + 2;
     let mut stamp = RgbaImage::from_pixel(buf_w, buf_h, image::Rgba([0, 0, 0, 0]));
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
 
-    // Shadow
-    let shadow = image::Rgba([0u8, 0, 0, 180]);
-    draw_text_mut(&mut stamp, shadow, 1, 1, scale, &font, &text);
+    if shadow {
+        let shadow_alpha = ((alpha as u16 * 180) / 255) as u8;
+        let shadow = image::Rgba([0u8, 0, 0, shadow_alpha]);
+        draw_text_mut(&mut stamp, shadow, 1, 1, scale, &font, text);
+    }
     // Foreground
-    let color = image::Rgba([
-        config.color.r,
-        config.color.g,
-        config.color.b,
-        config.color.a,
-    ]);
-    draw_text_mut(&mut stamp, color, 0, 0, scale, &font, &text);
+    let color = image::Rgba([color.r, color.g, color.b, alpha]);
+    draw_text_mut(&mut stamp, color, 0, 0, scale, &font, text);
 
     stamp
 }
@@ -270,17 +284,25 @@ pub fn overlay_text_with_stamp(
     config: &TextOverlayConfig,
     stamp: &RgbaImage,
 ) -> DynamicImage {
+    overlay_stamp_with_position(img, config.position, config.margin, stamp)
+}
+
+pub fn overlay_stamp_with_position(
+    img: DynamicImage,
+    position: TextPosition,
+    margin: u32,
+    stamp: &RgbaImage,
+) -> DynamicImage {
     // Avoid a full pixel-by-pixel clone if the image is already RGBA
     let mut rgba = match img {
         DynamicImage::ImageRgba8(existing) => existing,
         other => other.to_rgba8(),
     };
     let (img_w, img_h) = (rgba.width(), rgba.height());
-    let margin = config.margin;
     let stamp_w = stamp.width();
     let stamp_h = stamp.height();
 
-    let (x, y) = match config.position {
+    let (x, y) = match position {
         TextPosition::TopLeft => (margin as i64, margin as i64),
         TextPosition::TopRight => (
             (img_w.saturating_sub(stamp_w + margin)) as i64,
@@ -304,6 +326,106 @@ pub fn overlay_text_with_stamp(
     DynamicImage::ImageRgba8(rgba)
 }
 
+pub fn resize_to_33x66cm_poster(img: DynamicImage) -> DynamicImage {
+    const SHORT_SIDE: u32 = 3898; // round((33 / 2.54) * 300)
+    const LONG_SIDE: u32 = 7795; // round((66 / 2.54) * 300)
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return img;
+    }
+
+    let (target_w, target_h) = if w >= h {
+        (LONG_SIDE, SHORT_SIDE)
+    } else {
+        (SHORT_SIDE, LONG_SIDE)
+    };
+
+    let cropped = crop_to_aspect_centered(img, target_w as f32 / target_h as f32);
+    cropped.resize_exact(target_w, target_h, image::imageops::FilterType::Triangle)
+}
+
+pub fn crop_to_33x66cm_poster_aspect(img: DynamicImage) -> DynamicImage {
+    const SHORT_SIDE: f32 = 33.0;
+    const LONG_SIDE: f32 = 66.0;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return img;
+    }
+    let target_ratio = if w >= h {
+        LONG_SIDE / SHORT_SIDE
+    } else {
+        SHORT_SIDE / LONG_SIDE
+    };
+    crop_to_aspect_centered(img, target_ratio)
+}
+
+pub fn crop_to_aspect_centered(img: DynamicImage, target_ratio: f32) -> DynamicImage {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return img;
+    }
+    let current_ratio = w as f32 / h as f32;
+    if (current_ratio - target_ratio).abs() < 0.0001 {
+        return img;
+    }
+    if current_ratio > target_ratio {
+        let crop_w = ((h as f32) * target_ratio).round().clamp(1.0, w as f32) as u32;
+        let x = (w - crop_w) / 2;
+        img.crop_imm(x, 0, crop_w, h)
+    } else {
+        let crop_h = ((w as f32) / target_ratio).round().clamp(1.0, h as f32) as u32;
+        let y = (h - crop_h) / 2;
+        img.crop_imm(0, y, w, crop_h)
+    }
+}
+
+pub fn add_white_border(img: DynamicImage, border_px: u32) -> DynamicImage {
+    if border_px == 0 {
+        return img;
+    }
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return img;
+    }
+    let out_w = w.saturating_add(border_px.saturating_mul(2));
+    let out_h = h.saturating_add(border_px.saturating_mul(2));
+    let mut canvas = RgbaImage::from_pixel(out_w, out_h, image::Rgba([255, 255, 255, 255]));
+    let src = img.to_rgba8();
+    image::imageops::overlay(&mut canvas, &src, border_px as i64, border_px as i64);
+    DynamicImage::ImageRgba8(canvas)
+}
+
+pub fn load_watermark_stamp(
+    path: &Path,
+    opacity: f32,
+    scale_percent: f32,
+    rotation: Rotation,
+) -> Result<RgbaImage, String> {
+    let img = load_image(path)?;
+    let mut rgba = img.to_rgba8();
+
+    let alpha_scale = opacity.clamp(0.0, 1.0);
+    if alpha_scale < 1.0 {
+        for px in rgba.pixels_mut() {
+            let scaled = (px[3] as f32 * alpha_scale).round().clamp(0.0, 255.0) as u8;
+            px[3] = scaled;
+        }
+    }
+
+    let scale = scale_percent.clamp(1.0, 500.0) / 100.0;
+    if (scale - 1.0).abs() > f32::EPSILON {
+        let new_w = ((rgba.width() as f32) * scale).round().max(1.0) as u32;
+        let new_h = ((rgba.height() as f32) * scale).round().max(1.0) as u32;
+        rgba = image::imageops::resize(&rgba, new_w, new_h, image::imageops::FilterType::Triangle);
+    }
+
+    if rotation != Rotation::None {
+        rgba = rotate_image(&DynamicImage::ImageRgba8(rgba), rotation).to_rgba8();
+    }
+
+    Ok(rgba)
+}
+
 /// Overlay text onto the image, returning a new `DynamicImage`.
 ///
 /// `filename` is used to expand the `{filename}` template variable.
@@ -324,7 +446,7 @@ pub fn generate_thumbnail(img: &DynamicImage, max_size: u32) -> RgbaImage {
 
 /// Export a single image to a PDF file.
 ///
-/// The PDF page is sized to match the image at 72 DPI.
+/// The PDF page is sized to match the image at the requested DPI.
 ///
 /// # Errors
 /// Returns an error if encoding or writing fails.
@@ -332,13 +454,14 @@ pub fn export_single_image_to_pdf(
     img: &DynamicImage,
     output_path: &Path,
     quality: u8,
+    dpi: f32,
 ) -> Result<(), String> {
-    export_images_to_pdf(&[img], output_path, quality)
+    export_images_to_pdf(&[img], output_path, quality, dpi)
 }
 
 /// Export multiple images to a multi-page PDF.
 ///
-/// Each page is sized to match its image at 72 DPI.
+/// Each page is sized to match its image at the requested DPI.
 ///
 /// # Errors
 /// Returns an error if encoding or writing fails.
@@ -346,6 +469,7 @@ pub fn export_images_to_pdf(
     images: &[&DynamicImage],
     output_path: &Path,
     quality: u8,
+    dpi: f32,
 ) -> Result<(), String> {
     let mut pdf = Pdf::new();
 
@@ -382,8 +506,8 @@ pub fn export_images_to_pdf(
     for (i, img) in images.iter().enumerate() {
         let rgb = img.to_rgb8();
         let (w, h) = (rgb.width(), rgb.height());
-        let w_pt = w as f32;
-        let h_pt = h as f32;
+        let w_pt = w as f32 * 72.0 / dpi;
+        let h_pt = h as f32 * 72.0 / dpi;
 
         // Encode as JPEG for the PDF using turbojpeg
         let turbo_img = turbojpeg::Image {

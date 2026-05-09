@@ -19,7 +19,7 @@ pdf-writer = "0.14"
 tokio = { version = "1", features = ["fs", "sync", "rt-multi-thread"] }
 turbojpeg = "1.4"
 mimalloc = { version = "0.1", features = ["v3"] }
-lru = "0.17"
+lru = "0.18"
 parking_lot = "0.12"
 
 # High-performance concurrent containers

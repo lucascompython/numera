@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::numbering_mode::NumberingMode;
-use crate::processing::batch::{BatchConfig, OutputFormat, ProcessResult};
+use crate::processing::batch::{
+    BatchConfig, OutputFormat, PosterOptions, ProcessResult, WatermarkConfig, WatermarkRotation,
+    apply_preview_effects,
+};
 use crate::processing::image_cache::ImageCache;
 use crate::processing::image_ops::{Rotation, TextColor, TextOverlayConfig, TextPosition};
 use crate::processing::sort::{
@@ -41,6 +44,7 @@ impl<V: Clone + 'static> SelectItem for SelectOption<V> {
 
 type FormatSelectState = SelectState<Vec<SelectOption<OutputFormat>>>;
 type RotationSelectState = SelectState<Vec<SelectOption<Rotation>>>;
+type WatermarkRotationSelectState = SelectState<Vec<SelectOption<WatermarkRotation>>>;
 type PositionSelectState = SelectState<Vec<SelectOption<TextPosition>>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -76,9 +80,20 @@ pub struct App {
     text_enabled: bool,
     text_position: TextPosition,
     text_font_size: f32,
+    text_edge_margin: u32,
     text_color_r: u8,
     text_color_g: u8,
     text_color_b: u8,
+    poster_resize_33x66: bool,
+    poster_margin_enabled: bool,
+    poster_margin_px: u32,
+    watermark_enabled: bool,
+    watermark_image_path: Option<PathBuf>,
+    watermark_position: TextPosition,
+    watermark_edge_margin: u32,
+    watermark_scale_percent: f32,
+    watermark_opacity: f32,
+    watermark_rotation: WatermarkRotation,
 
     // Processing state
     is_processing: bool,
@@ -98,9 +113,16 @@ pub struct App {
     // Entity handles
     quality_slider: Entity<SliderState>,
     font_size_slider: Entity<SliderState>,
+    text_margin_slider: Entity<SliderState>,
+    poster_margin_slider: Entity<SliderState>,
+    watermark_margin_slider: Entity<SliderState>,
+    watermark_scale_slider: Entity<SliderState>,
+    watermark_opacity_slider: Entity<SliderState>,
     format_select: Entity<FormatSelectState>,
     rotation_select: Entity<RotationSelectState>,
+    watermark_rotation_select: Entity<WatermarkRotationSelectState>,
     position_select: Entity<PositionSelectState>,
+    watermark_position_select: Entity<PositionSelectState>,
     text_input: Entity<InputState>,
     color_picker: Entity<ColorPickerState>,
     text_template_value: String,
@@ -132,6 +154,41 @@ impl App {
                 .step(1.0)
                 .default_value(24.0)
         });
+        let text_margin_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(200.0)
+                .step(1.0)
+                .default_value(10.0)
+        });
+        let poster_margin_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(400.0)
+                .step(1.0)
+                .default_value(40.0)
+        });
+        let watermark_margin_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(200.0)
+                .step(1.0)
+                .default_value(10.0)
+        });
+        let watermark_scale_slider = cx.new(|_| {
+            SliderState::new()
+                .min(5.0)
+                .max(300.0)
+                .step(1.0)
+                .default_value(100.0)
+        });
+        let watermark_opacity_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.05)
+                .max(1.0)
+                .step(0.05)
+                .default_value(0.25)
+        });
 
         let format_items = vec![
             SelectOption {
@@ -144,7 +201,7 @@ impl App {
             },
         ];
         let format_select = cx.new(|cx| {
-            SelectState::new(format_items, Some(IndexPath::default().row(0)), window, cx)
+            SelectState::new(format_items, Some(IndexPath::default().row(1)), window, cx)
         });
 
         let rotation_items = vec![
@@ -168,6 +225,36 @@ impl App {
         let rotation_select = cx.new(|cx| {
             SelectState::new(
                 rotation_items,
+                Some(IndexPath::default().row(0)),
+                window,
+                cx,
+            )
+        });
+        let watermark_rotation_items = vec![
+            SelectOption {
+                label: "Match Image Rotation".into(),
+                value: WatermarkRotation::MatchImage,
+            },
+            SelectOption {
+                label: "None".into(),
+                value: WatermarkRotation::Fixed(Rotation::None),
+            },
+            SelectOption {
+                label: "90° CW".into(),
+                value: WatermarkRotation::Fixed(Rotation::Cw90),
+            },
+            SelectOption {
+                label: "180°".into(),
+                value: WatermarkRotation::Fixed(Rotation::Cw180),
+            },
+            SelectOption {
+                label: "270° CW".into(),
+                value: WatermarkRotation::Fixed(Rotation::Cw270),
+            },
+        ];
+        let watermark_rotation_select = cx.new(|cx| {
+            SelectState::new(
+                watermark_rotation_items,
                 Some(IndexPath::default().row(0)),
                 window,
                 cx,
@@ -198,8 +285,16 @@ impl App {
         ];
         let position_select = cx.new(|cx| {
             SelectState::new(
-                position_items,
+                position_items.clone(),
                 Some(IndexPath::default().row(3)),
+                window,
+                cx,
+            )
+        });
+        let watermark_position_select = cx.new(|cx| {
+            SelectState::new(
+                position_items,
+                Some(IndexPath::default().row(4)),
                 window,
                 cx,
             )
@@ -209,7 +304,6 @@ impl App {
         text_input.update(cx, |state, cx| {
             state.set_value("{filename}", window, cx);
         });
-
         let color_picker =
             cx.new(|cx| ColorPickerState::new(window, cx).default_value(hsla(0.0, 0.0, 1.0, 1.0)));
 
@@ -231,6 +325,56 @@ impl App {
             |this, _, ev: &SliderEvent, _window, cx| {
                 let SliderEvent::Change(val) = ev;
                 this.text_font_size = val.start();
+                this.schedule_preview_update(cx);
+                cx.notify();
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &text_margin_slider,
+            window,
+            |this, _, ev: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(val) = ev;
+                this.text_edge_margin = val.start() as u32;
+                this.schedule_preview_update(cx);
+                cx.notify();
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &poster_margin_slider,
+            window,
+            |this, _, ev: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(val) = ev;
+                this.poster_margin_px = val.start() as u32;
+                this.schedule_preview_update(cx);
+                cx.notify();
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &watermark_margin_slider,
+            window,
+            |this, _, ev: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(val) = ev;
+                this.watermark_edge_margin = val.start() as u32;
+                this.schedule_preview_update(cx);
+                cx.notify();
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &watermark_scale_slider,
+            window,
+            |this, _, ev: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(val) = ev;
+                this.watermark_scale_percent = val.start();
+                this.schedule_preview_update(cx);
+                cx.notify();
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &watermark_opacity_slider,
+            window,
+            |this, _, ev: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(val) = ev;
+                this.watermark_opacity = val.start();
                 this.schedule_preview_update(cx);
                 cx.notify();
             },
@@ -258,6 +402,17 @@ impl App {
                 }
             },
         ));
+        subs.push(cx.subscribe_in(
+            &watermark_rotation_select,
+            window,
+            |this, _, ev: &SelectEvent<Vec<SelectOption<WatermarkRotation>>>, _window, cx| {
+                if let SelectEvent::Confirm(Some(value)) = ev {
+                    this.watermark_rotation = *value;
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                }
+            },
+        ));
 
         subs.push(cx.subscribe_in(
             &position_select,
@@ -265,6 +420,17 @@ impl App {
             |this, _, ev: &SelectEvent<Vec<SelectOption<TextPosition>>>, _window, cx| {
                 if let SelectEvent::Confirm(Some(value)) = ev {
                     this.text_position = *value;
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                }
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &watermark_position_select,
+            window,
+            |this, _, ev: &SelectEvent<Vec<SelectOption<TextPosition>>>, _window, cx| {
+                if let SelectEvent::Confirm(Some(value)) = ev {
+                    this.watermark_position = *value;
                     this.schedule_preview_update(cx);
                     cx.notify();
                 }
@@ -283,7 +449,6 @@ impl App {
                 }
             },
         ));
-
         subs.push(cx.subscribe_in(
             &color_picker,
             window,
@@ -318,9 +483,20 @@ impl App {
             text_enabled: false,
             text_position: TextPosition::BottomRight,
             text_font_size: 24.0,
+            text_edge_margin: 10,
             text_color_r: 255,
             text_color_g: 255,
             text_color_b: 255,
+            poster_resize_33x66: false,
+            poster_margin_enabled: false,
+            poster_margin_px: 40,
+            watermark_enabled: false,
+            watermark_image_path: None,
+            watermark_position: TextPosition::Center,
+            watermark_edge_margin: 10,
+            watermark_scale_percent: 100.0,
+            watermark_opacity: 0.25,
+            watermark_rotation: WatermarkRotation::MatchImage,
 
             is_processing: false,
             progress: 0.0,
@@ -337,9 +513,16 @@ impl App {
 
             quality_slider,
             font_size_slider,
+            text_margin_slider,
+            poster_margin_slider,
+            watermark_margin_slider,
+            watermark_scale_slider,
+            watermark_opacity_slider,
             format_select,
             rotation_select,
+            watermark_rotation_select,
             position_select,
+            watermark_position_select,
             text_input,
             color_picker,
             text_template_value: "{filename}".to_string(),
@@ -429,6 +612,25 @@ impl App {
         .detach();
     }
 
+    fn choose_watermark_image(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let handle = rfd::AsyncFileDialog::new()
+                .set_title("Select watermark image")
+                .add_filter("Images", &["png", "jpg", "jpeg"])
+                .pick_file()
+                .await;
+            if let Some(file) = handle {
+                let path = file.path().to_path_buf();
+                _ = this.update(cx, |this, cx| {
+                    this.watermark_image_path = Some(path);
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     fn start_batch(&mut self, cx: &mut Context<Self>) {
         if self.image_paths.is_empty() {
             self.status_message = "No images loaded".into();
@@ -440,6 +642,11 @@ impl App {
             cx.notify();
             return;
         };
+        if self.watermark_enabled && self.watermark_image_path.is_none() {
+            self.status_message = "Select a watermark image first".into();
+            cx.notify();
+            return;
+        }
 
         self.is_processing = true;
         self.progress = 0.0;
@@ -456,6 +663,8 @@ impl App {
             } else {
                 None
             },
+            poster: self.build_poster_options(),
+            watermark: self.build_watermark_config(),
             output_format: self.output_format,
             output_dir: output_dir.clone(),
         };
@@ -615,10 +824,18 @@ impl App {
         let preview_path = self.image_paths[idx].clone();
         let status_path = preview_path.clone();
         let rotation = self.rotation;
-        let text_config = if self.text_enabled {
-            Some(self.build_text_config())
-        } else {
-            None
+        let preview_config = BatchConfig {
+            quality: self.quality,
+            rotation,
+            text_overlay: if self.text_enabled {
+                Some(self.build_text_config())
+            } else {
+                None
+            },
+            poster: self.build_poster_options(),
+            watermark: self.build_watermark_config(),
+            output_format: self.output_format,
+            output_dir: self.output_dir.clone().unwrap_or_default(),
         };
 
         let cache = self.image_cache.clone();
@@ -637,18 +854,21 @@ impl App {
                 .spawn(async move {
                     (|| {
                         let cached = cache.get_or_decode(&preview_path, rotation, None)?;
-                        if text_config.is_none() {
+                        if preview_config.text_overlay.is_none()
+                            && !preview_config.poster.resize_to_33x66cm
+                            && preview_config.poster.margin_px == 0
+                            && preview_config.watermark.is_none()
+                        {
                             return Some(cached.preview_image.clone());
                         }
 
-                        let cfg = text_config.as_ref()?;
                         let preview = image::DynamicImage::ImageRgba8((*cached.rgba).clone());
                         let filename = preview_path
                             .file_stem()
                             .and_then(|n| n.to_str())
                             .unwrap_or("image");
                         let rgba =
-                            crate::processing::image_ops::overlay_text(preview, cfg, filename)
+                            apply_preview_effects(preview, filename, &preview_config, None, None)
                                 .into_rgba8();
 
                         Some(Arc::new(
@@ -690,11 +910,14 @@ impl App {
 
         let paths = &self.image_paths;
         let mut adjacent = Vec::new();
-        if idx > 0 {
-            adjacent.push(paths[idx - 1].clone());
-        }
-        if idx + 1 < paths.len() {
-            adjacent.push(paths[idx + 1].clone());
+        for offset in [1usize, 2usize] {
+            if idx >= offset {
+                adjacent.push(paths[idx - offset].clone());
+            }
+            let next = idx + offset;
+            if next < paths.len() {
+                adjacent.push(paths[next].clone());
+            }
         }
 
         if adjacent.is_empty() {
@@ -723,8 +946,33 @@ impl App {
                 b: self.text_color_b,
                 a: 255,
             },
-            margin: 10,
+            margin: self.text_edge_margin,
         }
+    }
+
+    fn build_poster_options(&self) -> PosterOptions {
+        PosterOptions {
+            resize_to_33x66cm: self.poster_resize_33x66,
+            margin_px: if self.poster_margin_enabled {
+                self.poster_margin_px
+            } else {
+                0
+            },
+        }
+    }
+
+    fn build_watermark_config(&self) -> Option<WatermarkConfig> {
+        if !self.watermark_enabled {
+            return None;
+        }
+        Some(WatermarkConfig {
+            image_path: self.watermark_image_path.clone()?,
+            position: self.watermark_position,
+            margin: self.watermark_edge_margin,
+            scale_percent: self.watermark_scale_percent,
+            opacity: self.watermark_opacity,
+            rotation: self.watermark_rotation,
+        })
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1111,8 +1359,157 @@ impl App {
                 .child(
                     v_flex()
                         .gap_1()
-                        .child(section_title("Text Color"))
-                        .child(ColorPicker::new(&self.color_picker)),
+                        .child(section_title(&format!(
+                            "Edge Margin: {} px",
+                            self.text_edge_margin
+                        )))
+                        .child(Slider::new(&self.text_margin_slider).w_full()),
+                )
+                .child(
+                    v_flex().gap_1().child(section_title("Text Color")).child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .p_1()
+                                    .border_1()
+                                    .rounded_md()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().background)
+                                    .child(ColorPicker::new(&self.color_picker)),
+                            )
+                            .child(div().flex_1()),
+                    ),
+                );
+        }
+
+        let mut poster_section = v_flex()
+            .gap_2()
+            .child(section_title("Poster Options"))
+            .child(
+                Checkbox::new("poster-33x66")
+                    .checked(self.poster_resize_33x66)
+                    .label("Resize/Crop to 33 x 66 cm (300 DPI)")
+                    .on_click({
+                        let entity = entity.clone();
+                        move |checked, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.poster_resize_33x66 = *checked;
+                                this.schedule_preview_update(cx);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(
+                Checkbox::new("poster-margin")
+                    .checked(self.poster_margin_enabled)
+                    .label("Add white border margin")
+                    .on_click({
+                        let entity = entity.clone();
+                        move |checked, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.poster_margin_enabled = *checked;
+                                this.schedule_preview_update(cx);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            );
+        if self.poster_margin_enabled {
+            poster_section = poster_section.child(
+                v_flex()
+                    .gap_1()
+                    .child(section_title(&format!(
+                        "Margin: {} px",
+                        self.poster_margin_px
+                    )))
+                    .child(Slider::new(&self.poster_margin_slider).w_full()),
+            );
+        }
+
+        let mut watermark_section = v_flex().gap_2().child(section_title("Watermark")).child(
+            Checkbox::new("watermark-enabled")
+                .checked(self.watermark_enabled)
+                .label("Add watermark")
+                .on_click({
+                    let entity = entity.clone();
+                    move |checked, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.watermark_enabled = *checked;
+                            this.schedule_preview_update(cx);
+                            cx.notify();
+                        });
+                    }
+                }),
+        );
+        if self.watermark_enabled {
+            let watermark_label: SharedString = self
+                .watermark_image_path
+                .as_ref()
+                .and_then(|p| p.file_name().and_then(|n| n.to_str()))
+                .unwrap_or("Not selected")
+                .to_string()
+                .into();
+            watermark_section = watermark_section
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_sm().child(watermark_label))
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("watermark-browse-btn")
+                                .label("Choose Image")
+                                .small()
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_, _, cx| {
+                                        entity
+                                            .update(cx, |this, cx| this.choose_watermark_image(cx));
+                                    }
+                                }),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(section_title("Position"))
+                        .child(self.watermark_position_select.clone()),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(section_title("Rotation"))
+                        .child(self.watermark_rotation_select.clone()),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(section_title(&format!(
+                            "Edge Margin: {} px",
+                            self.watermark_edge_margin
+                        )))
+                        .child(Slider::new(&self.watermark_margin_slider).w_full()),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(section_title(&format!(
+                            "Size: {:.0}%",
+                            self.watermark_scale_percent
+                        )))
+                        .child(Slider::new(&self.watermark_scale_slider).w_full()),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(section_title(&format!(
+                            "Opacity: {:.0}%",
+                            self.watermark_opacity * 100.0
+                        )))
+                        .child(Slider::new(&self.watermark_opacity_slider).w_full()),
                 );
         }
 
@@ -1189,8 +1586,11 @@ impl App {
         let divider = || div().h(px(1.)).bg(cx.theme().border);
 
         let settings_col = v_flex()
+            .flex_none()
+            .w_full()
             .gap_3()
             .p_3()
+            .pb_12()
             .child(format_section)
             .child(divider())
             .child(quality_section)
@@ -1199,6 +1599,10 @@ impl App {
             .child(divider())
             .child(text_section)
             .child(divider())
+            .child(poster_section)
+            .child(divider())
+            .child(watermark_section)
+            .child(divider())
             .child(output_section)
             .child(divider())
             .child(process_button)
@@ -1206,7 +1610,9 @@ impl App {
 
         v_flex()
             .w(px(280.))
-            .h_full()
+            .flex_none()
+            .self_stretch()
+            .min_h(px(0.))
             .border_l_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
@@ -1312,8 +1718,10 @@ impl Render for App {
 
                 v_flex()
                     .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
                     .child(main_row)
-                    .child(status_bar)
+                    .child(status_bar.flex_none())
                     .into_any_element()
             }
             AppMode::Numbering => div()
