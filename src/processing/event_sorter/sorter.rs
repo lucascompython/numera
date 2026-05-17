@@ -13,6 +13,7 @@ pub enum SortMode {
 pub fn destination_folder(output_dir: &Path, status: &str, number: Option<&str>) -> PathBuf {
     match (status, number) {
         ("assigned_by_ocr", Some(number)) => output_dir.join(number),
+        ("assigned_by_visual_match", Some(number)) => output_dir.join(number),
         ("ambiguous", _) => output_dir.join("_ambiguous"),
         ("no_sticker_found", _) => output_dir.join("_no_sticker"),
         _ => output_dir.join("_review"),

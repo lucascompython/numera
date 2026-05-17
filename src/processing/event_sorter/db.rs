@@ -46,11 +46,62 @@ pub struct AssignmentRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct VisualEmbeddingRecord {
+    pub image_id: i64,
+    pub model_name: String,
+    pub crop_path: Option<PathBuf>,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnchorEmbedding {
+    pub image_id: i64,
+    pub number: String,
+    pub assignment_confidence: f32,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CandidateEmbedding {
+    pub image_id: i64,
+    pub file_path: PathBuf,
+    pub status: String,
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VisualMatchRecord {
+    pub image_id: i64,
+    pub matched_anchor_image_id: i64,
+    pub matched_number: String,
+    pub similarity: f32,
+    pub rank: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct VisualAssignmentRecord {
+    pub image_id: i64,
+    pub final_number: String,
+    pub confidence: f32,
+    pub notes: Option<String>,
+    pub matches: Vec<VisualMatchRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SortDecision {
+    pub image_id: i64,
+    pub file_path: PathBuf,
+    pub status: String,
+    pub final_number: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ImageProcessingRecord {
     pub image_id: i64,
     pub status: String,
     pub sticker_match: StickerMatchRecord,
     pub ocr_result: Option<OcrRecord>,
+    pub visual_embedding: Option<VisualEmbeddingRecord>,
     pub assignment: AssignmentRecord,
 }
 
@@ -368,6 +419,29 @@ pub fn save_processing_result(conn: &mut Connection, record: &ImageProcessingRec
         )?;
     }
 
+    if let Some(embedding) = record.visual_embedding.as_ref() {
+        tx.execute(
+            "INSERT INTO visual_embeddings (
+                image_id,
+                model_name,
+                crop_path,
+                embedding_blob,
+                embedding_dim
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(image_id, model_name) DO UPDATE SET
+                crop_path = excluded.crop_path,
+                embedding_blob = excluded.embedding_blob,
+                embedding_dim = excluded.embedding_dim",
+            params![
+                embedding.image_id,
+                embedding.model_name,
+                optional_path(&embedding.crop_path),
+                embedding_to_blob(&embedding.embedding),
+                embedding.embedding.len() as i32,
+            ],
+        )?;
+    }
+
     tx.execute(
         "INSERT INTO assignments (
             image_id,
@@ -404,6 +478,212 @@ pub fn save_processing_result(conn: &mut Connection, record: &ImageProcessingRec
     Ok(())
 }
 
+pub fn load_anchor_embeddings(
+    conn: &Connection,
+    event_id: i64,
+    model_name: &str,
+) -> Result<Vec<AnchorEmbedding>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            images.id,
+            assignments.final_number,
+            assignments.confidence,
+            visual_embeddings.embedding_blob
+         FROM images
+         JOIN assignments ON assignments.image_id = images.id
+         JOIN visual_embeddings ON visual_embeddings.image_id = images.id
+         WHERE images.event_id = ?1
+            AND visual_embeddings.model_name = ?2
+            AND assignments.assignment_method = 'assigned_by_ocr'
+            AND assignments.needs_review = 0
+            AND assignments.final_number IS NOT NULL",
+    )?;
+
+    let rows = stmt.query_map(params![event_id, model_name], |row| {
+        let blob: Vec<u8> = row.get(3)?;
+        Ok(AnchorEmbedding {
+            image_id: row.get(0)?,
+            number: row.get(1)?,
+            assignment_confidence: row.get(2)?,
+            embedding: blob_to_embedding(&blob),
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to load visual anchor embeddings")
+}
+
+pub fn load_visual_candidates(
+    conn: &Connection,
+    event_id: i64,
+    model_name: &str,
+) -> Result<Vec<CandidateEmbedding>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            images.id,
+            images.file_path,
+            images.status,
+            visual_embeddings.embedding_blob
+         FROM images
+         JOIN assignments ON assignments.image_id = images.id
+         JOIN visual_embeddings ON visual_embeddings.image_id = images.id
+         WHERE images.event_id = ?1
+            AND visual_embeddings.model_name = ?2
+            AND assignments.needs_review = 1",
+    )?;
+
+    let rows = stmt.query_map(params![event_id, model_name], |row| {
+        let blob: Vec<u8> = row.get(3)?;
+        Ok(CandidateEmbedding {
+            image_id: row.get(0)?,
+            file_path: PathBuf::from(row.get::<_, String>(1)?),
+            status: row.get(2)?,
+            embedding: blob_to_embedding(&blob),
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to load visual candidate embeddings")
+}
+
+pub fn save_visual_assignment(
+    conn: &mut Connection,
+    assignment: &VisualAssignmentRecord,
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM visual_matches WHERE image_id = ?1",
+        [assignment.image_id],
+    )?;
+
+    for matched in &assignment.matches {
+        tx.execute(
+            "INSERT INTO visual_matches (
+                image_id,
+                matched_anchor_image_id,
+                matched_number,
+                similarity,
+                rank
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(image_id, rank) DO UPDATE SET
+                matched_anchor_image_id = excluded.matched_anchor_image_id,
+                matched_number = excluded.matched_number,
+                similarity = excluded.similarity",
+            params![
+                matched.image_id,
+                matched.matched_anchor_image_id,
+                matched.matched_number,
+                matched.similarity,
+                matched.rank,
+            ],
+        )?;
+    }
+
+    tx.execute(
+        "INSERT INTO assignments (
+            image_id,
+            final_number,
+            assignment_method,
+            confidence,
+            needs_review,
+            notes
+         ) VALUES (?1, ?2, 'assigned_by_visual_match', ?3, 0, ?4)
+         ON CONFLICT(image_id) DO UPDATE SET
+            final_number = excluded.final_number,
+            assignment_method = excluded.assignment_method,
+            confidence = excluded.confidence,
+            needs_review = excluded.needs_review,
+            notes = excluded.notes",
+        params![
+            assignment.image_id,
+            assignment.final_number,
+            assignment.confidence,
+            assignment.notes,
+        ],
+    )?;
+
+    tx.execute(
+        "UPDATE images SET status = 'assigned_by_visual_match' WHERE id = ?1",
+        [assignment.image_id],
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn save_visual_match_candidates(
+    conn: &mut Connection,
+    image_id: i64,
+    matches: &[VisualMatchRecord],
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM visual_matches WHERE image_id = ?1", [image_id])?;
+    for matched in matches {
+        tx.execute(
+            "INSERT INTO visual_matches (
+                image_id,
+                matched_anchor_image_id,
+                matched_number,
+                similarity,
+                rank
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                matched.image_id,
+                matched.matched_anchor_image_id,
+                matched.matched_number,
+                matched.similarity,
+                matched.rank,
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn load_sort_decisions(conn: &Connection, image_ids: &[i64]) -> Result<Vec<SortDecision>> {
+    let mut decisions = Vec::with_capacity(image_ids.len());
+    let mut stmt = conn.prepare(
+        "SELECT
+            images.id,
+            images.file_path,
+            images.status,
+            assignments.final_number
+         FROM images
+         JOIN assignments ON assignments.image_id = images.id
+         WHERE images.id = ?1",
+    )?;
+
+    for image_id in image_ids {
+        let decision = stmt
+            .query_row([image_id], |row| {
+                Ok(SortDecision {
+                    image_id: row.get(0)?,
+                    file_path: PathBuf::from(row.get::<_, String>(1)?),
+                    status: row.get(2)?,
+                    final_number: row.get(3)?,
+                })
+            })
+            .with_context(|| format!("failed to load sort decision for image {image_id}"))?;
+        decisions.push(decision);
+    }
+
+    Ok(decisions)
+}
+
 fn optional_path(path: &Option<PathBuf>) -> Option<String> {
     path.as_ref().map(|path| path.to_string_lossy().to_string())
+}
+
+fn embedding_to_blob(values: &[f32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
+    for value in values {
+        blob.extend_from_slice(&value.to_le_bytes());
+    }
+    blob
+}
+
+fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }

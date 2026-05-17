@@ -8,13 +8,16 @@ use rusqlite::Connection;
 
 use super::db::{
     self, AssignmentRecord, ImageProcessingRecord, OcrRecord, ProcessingDb, StickerMatchRecord,
+    VisualEmbeddingRecord,
 };
+use super::embedding::generate_visual_embedding;
 use super::event_config::EventConfig;
 use super::image_loader::discover_images;
 use super::number_cropper::crop_number_region;
 use super::preprocessing::{mat_to_dynamic_image, preprocess_number_crop, write_debug_image};
 use super::sorter::{self, SortMode};
 use super::sticker_matcher::{StickerDetection, StickerMatcher};
+use super::visual_matcher::{self, VisualMatcherConfig};
 
 #[derive(Debug, Clone)]
 pub struct FirstStageConfig {
@@ -51,14 +54,16 @@ pub struct FirstStageSummary {
     pub processed: usize,
     pub skipped: usize,
     pub assigned_by_ocr: usize,
+    pub assigned_by_visual_match: usize,
     pub needs_review: usize,
     pub no_sticker_found: usize,
     pub ocr_failed: usize,
     pub failed: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ImageRunResult {
+    image_id: Option<i64>,
     status: String,
     skipped: bool,
     error: Option<String>,
@@ -74,7 +79,6 @@ pub fn run_first_stage(
     let paths = discover_images(&config.source_dir)?;
     let total = paths.len();
     let completed = Arc::new(AtomicUsize::new(0));
-    let output_lock = Arc::new(Mutex::new(()));
     let progress_callback = &progress_callback;
 
     let results: Vec<ImageRunResult> = paths
@@ -83,7 +87,7 @@ pub fn run_first_stage(
             || Worker::new(config, event.clone()).map_err(|err| err.to_string()),
             |worker, path| {
                 let result = match worker {
-                    Ok(worker) => worker.process(path, &output_lock),
+                    Ok(worker) => worker.process(path),
                     Err(err) => Err(anyhow::anyhow!(err.clone())),
                 };
                 let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -91,6 +95,7 @@ pub fn run_first_stage(
                 match result {
                     Ok(result) => result,
                     Err(err) => ImageRunResult {
+                        image_id: None,
                         status: "failed".to_string(),
                         skipped: false,
                         error: Some(err.to_string()),
@@ -100,7 +105,29 @@ pub fn run_first_stage(
         )
         .collect();
 
-    Ok(summarize(total, &results))
+    let processed_ids: Vec<i64> = results
+        .iter()
+        .filter(|result| !result.skipped && result.error.is_none())
+        .filter_map(|result| result.image_id)
+        .collect();
+
+    let mut final_results: Vec<ImageRunResult> = results
+        .iter()
+        .filter(|result| result.skipped || result.error.is_some())
+        .cloned()
+        .collect();
+
+    if !processed_ids.is_empty() {
+        let mut conn = db.connect()?;
+        let _visual_summary = visual_matcher::run_anchor_visual_matching(
+            &mut conn,
+            config.event_id,
+            &VisualMatcherConfig::default(),
+        )?;
+        final_results.extend(sort_processed_images(&db, config, &processed_ids)?);
+    }
+
+    Ok(summarize(total, &final_results))
 }
 
 struct Worker {
@@ -108,7 +135,6 @@ struct Worker {
     event: EventConfig,
     matcher: StickerMatcher,
     output_dir: PathBuf,
-    mode: SortMode,
     debug_mode: bool,
     reprocess: bool,
     thresholds: ProcessingThresholds,
@@ -123,20 +149,16 @@ impl Worker {
             event,
             matcher,
             output_dir: config.output_dir.clone(),
-            mode: config.mode,
             debug_mode: config.debug_mode,
             reprocess: config.reprocess,
             thresholds: config.thresholds,
         })
     }
 
-    fn process(
-        &mut self,
-        image_path: &Path,
-        output_lock: &Arc<Mutex<()>>,
-    ) -> Result<ImageRunResult> {
+    fn process(&mut self, image_path: &Path) -> Result<ImageRunResult> {
         if !self.reprocess && db::is_image_processed(&self.conn, self.event.id, image_path)? {
             return Ok(ImageRunResult {
+                image_id: None,
                 status: "skipped".to_string(),
                 skipped: true,
                 error: None,
@@ -146,7 +168,7 @@ impl Worker {
         let detection = match self.matcher.detect(image_path) {
             Ok(detection) => detection,
             Err(err) => {
-                return self.persist_failure_review(image_path, err, output_lock);
+                return self.persist_failure_review(image_path, err);
             }
         };
 
@@ -159,6 +181,7 @@ impl Worker {
         )?;
         if image_identity.already_processed && !self.reprocess {
             return Ok(ImageRunResult {
+                image_id: Some(image_identity.id),
                 status: "skipped".to_string(),
                 skipped: true,
                 error: None,
@@ -173,22 +196,14 @@ impl Worker {
             image_path,
         );
 
-        let (record, sort_status, sort_number) =
-            self.process_detection(image_identity.id, detection, &debug_paths)?;
+        let visual_embedding =
+            self.visual_embedding_record(image_identity.id, image_path, &debug_paths);
+        let record =
+            self.process_detection(image_identity.id, detection, &debug_paths, visual_embedding)?;
         db::save_processing_result(&mut self.conn, &record)?;
 
-        {
-            let _guard = output_lock.lock().expect("output lock poisoned");
-            sorter::place_file(
-                image_path,
-                &self.output_dir,
-                &sort_status,
-                sort_number.as_deref(),
-                self.mode,
-            )?;
-        }
-
         Ok(ImageRunResult {
+            image_id: Some(record.image_id),
             status: record.status,
             skipped: false,
             error: None,
@@ -200,7 +215,8 @@ impl Worker {
         image_id: i64,
         detection: StickerDetection,
         debug_paths: &DebugPaths,
-    ) -> Result<(ImageProcessingRecord, String, Option<String>)> {
+        visual_embedding: Option<VisualEmbeddingRecord>,
+    ) -> Result<ImageProcessingRecord> {
         if !detection.found {
             let note = detection
                 .note
@@ -211,6 +227,7 @@ impl Worker {
                 status: "no_sticker_found".to_string(),
                 sticker_match: sticker_record(&detection, None, None),
                 ocr_result: None,
+                visual_embedding,
                 assignment: AssignmentRecord {
                     final_number: None,
                     assignment_method: "no_sticker_found".to_string(),
@@ -219,7 +236,7 @@ impl Worker {
                     notes: Some(note),
                 },
             };
-            return Ok((record, "no_sticker_found".to_string(), None));
+            return Ok(record);
         }
 
         let warped = detection
@@ -266,7 +283,7 @@ impl Worker {
             }
         });
 
-        let (status, assignment, sort_number) = match ocr_record.as_ref() {
+        let (status, assignment) = match ocr_record.as_ref() {
             Some(ocr) if ocr.is_high_confidence => (
                 "assigned_by_ocr".to_string(),
                 AssignmentRecord {
@@ -276,7 +293,6 @@ impl Worker {
                     needs_review: false,
                     notes: None,
                 },
-                Some(ocr.digits_only.clone()),
             ),
             Some(ocr) => (
                 "needs_review".to_string(),
@@ -293,7 +309,6 @@ impl Worker {
                         detection.good_match_count
                     )),
                 },
-                None,
             ),
             None => (
                 "ocr_failed".to_string(),
@@ -304,7 +319,6 @@ impl Worker {
                     needs_review: true,
                     notes: Some("OCR returned no digit candidate".to_string()),
                 },
-                None,
             ),
         };
 
@@ -317,19 +331,28 @@ impl Worker {
                 debug_paths.number_crop.clone(),
             ),
             ocr_result: ocr_record,
+            visual_embedding,
             assignment,
         };
 
-        Ok((record, status, sort_number))
+        Ok(record)
     }
 
     fn persist_failure_review(
         &mut self,
         image_path: &Path,
         err: anyhow::Error,
-        output_lock: &Arc<Mutex<()>>,
     ) -> Result<ImageRunResult> {
         let image_identity = db::upsert_image(&self.conn, self.event.id, image_path, None, None)?;
+        let debug_paths = DebugPaths::new(
+            self.debug_mode,
+            &self.output_dir,
+            self.event.id,
+            image_identity.id,
+            image_path,
+        );
+        let visual_embedding =
+            self.visual_embedding_record(image_identity.id, image_path, &debug_paths);
         let record = ImageProcessingRecord {
             image_id: image_identity.id,
             status: "needs_review".to_string(),
@@ -342,6 +365,7 @@ impl Worker {
                 number_crop_path: None,
             },
             ocr_result: None,
+            visual_embedding,
             assignment: AssignmentRecord {
                 final_number: None,
                 assignment_method: "needs_review".to_string(),
@@ -351,21 +375,28 @@ impl Worker {
             },
         };
         db::save_processing_result(&mut self.conn, &record)?;
-        {
-            let _guard = output_lock.lock().expect("output lock poisoned");
-            sorter::place_file(
-                image_path,
-                &self.output_dir,
-                "needs_review",
-                None,
-                self.mode,
-            )?;
-        }
 
         Ok(ImageRunResult {
+            image_id: Some(image_identity.id),
             status: "needs_review".to_string(),
             skipped: false,
             error: None,
+        })
+    }
+
+    fn visual_embedding_record(
+        &self,
+        image_id: i64,
+        image_path: &Path,
+        debug_paths: &DebugPaths,
+    ) -> Option<VisualEmbeddingRecord> {
+        let generated =
+            generate_visual_embedding(image_path, debug_paths.visual_crop.as_deref()).ok()?;
+        Some(VisualEmbeddingRecord {
+            image_id,
+            model_name: generated.model_name,
+            crop_path: generated.crop_path,
+            embedding: generated.values,
         })
     }
 }
@@ -375,6 +406,7 @@ struct DebugPaths {
     warped_sticker: Option<PathBuf>,
     number_crop: Option<PathBuf>,
     thresholded_crop: Option<PathBuf>,
+    visual_crop: Option<PathBuf>,
 }
 
 impl DebugPaths {
@@ -390,6 +422,7 @@ impl DebugPaths {
                 warped_sticker: None,
                 number_crop: None,
                 thresholded_crop: None,
+                visual_crop: None,
             };
         }
 
@@ -406,8 +439,50 @@ impl DebugPaths {
             warped_sticker: Some(base.with_extension("warped_sticker.png")),
             number_crop: Some(base.with_extension("number_crop.png")),
             thresholded_crop: Some(base.with_extension("thresholded_number.png")),
+            visual_crop: Some(base.with_extension("visual_crop.png")),
         }
     }
+}
+
+fn sort_processed_images(
+    db: &ProcessingDb,
+    config: &FirstStageConfig,
+    image_ids: &[i64],
+) -> Result<Vec<ImageRunResult>> {
+    let conn = db.connect()?;
+    let decisions = db::load_sort_decisions(&conn, image_ids)?;
+    let output_lock = Arc::new(Mutex::new(()));
+
+    Ok(decisions
+        .into_iter()
+        .map(|decision| {
+            let result = {
+                let _guard = output_lock.lock().expect("output lock poisoned");
+                sorter::place_file(
+                    &decision.file_path,
+                    &config.output_dir,
+                    &decision.status,
+                    decision.final_number.as_deref(),
+                    config.mode,
+                )
+            };
+
+            match result {
+                Ok(_) => ImageRunResult {
+                    image_id: Some(decision.image_id),
+                    status: decision.status,
+                    skipped: false,
+                    error: None,
+                },
+                Err(err) => ImageRunResult {
+                    image_id: Some(decision.image_id),
+                    status: "failed".to_string(),
+                    skipped: false,
+                    error: Some(err.to_string()),
+                },
+            }
+        })
+        .collect())
 }
 
 fn sticker_record(
@@ -448,6 +523,7 @@ fn summarize(discovered: usize, results: &[ImageRunResult]) -> FirstStageSummary
         summary.processed += 1;
         match result.status.as_str() {
             "assigned_by_ocr" => summary.assigned_by_ocr += 1,
+            "assigned_by_visual_match" => summary.assigned_by_visual_match += 1,
             "no_sticker_found" => summary.no_sticker_found += 1,
             "ocr_failed" => summary.ocr_failed += 1,
             "needs_review" => summary.needs_review += 1,
