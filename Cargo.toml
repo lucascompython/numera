@@ -24,6 +24,7 @@ parking_lot = "0.12"
 anyhow = "1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 opencv = { version = "0.98", default-features = false, features = ["clang-runtime", "calib3d", "features2d", "imgcodecs", "imgproc", "photo"] }
+ort = "2.0.0-rc.12"
 
 # High-performance concurrent containers
 scc = "3"

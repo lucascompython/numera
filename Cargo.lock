@@ -4768,6 +4768,7 @@ dependencies = [
  "mimalloc",
  "oar-ocr",
  "opencv",
+ "ort",
  "parking_lot",
  "pdf-writer",
  "rapidhash",

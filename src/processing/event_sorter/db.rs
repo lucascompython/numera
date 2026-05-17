@@ -529,7 +529,8 @@ pub fn load_visual_candidates(
          JOIN visual_embeddings ON visual_embeddings.image_id = images.id
          WHERE images.event_id = ?1
             AND visual_embeddings.model_name = ?2
-            AND assignments.needs_review = 1",
+            AND assignments.needs_review = 1
+            AND assignments.assignment_method != 'assigned_by_ocr'",
     )?;
 
     let rows = stmt.query_map(params![event_id, model_name], |row| {
@@ -636,6 +637,65 @@ pub fn save_visual_match_candidates(
             ],
         )?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn save_ambiguous_visual_assignment(
+    conn: &mut Connection,
+    image_id: i64,
+    confidence: f32,
+    notes: Option<String>,
+    matches: &[VisualMatchRecord],
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM visual_matches WHERE image_id = ?1", [image_id])?;
+    for matched in matches {
+        tx.execute(
+            "INSERT INTO visual_matches (
+                image_id,
+                matched_anchor_image_id,
+                matched_number,
+                similarity,
+                rank
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(image_id, rank) DO UPDATE SET
+                matched_anchor_image_id = excluded.matched_anchor_image_id,
+                matched_number = excluded.matched_number,
+                similarity = excluded.similarity",
+            params![
+                matched.image_id,
+                matched.matched_anchor_image_id,
+                matched.matched_number,
+                matched.similarity,
+                matched.rank,
+            ],
+        )?;
+    }
+
+    tx.execute(
+        "INSERT INTO assignments (
+            image_id,
+            final_number,
+            assignment_method,
+            confidence,
+            needs_review,
+            notes
+         ) VALUES (?1, NULL, 'ambiguous', ?2, 1, ?3)
+         ON CONFLICT(image_id) DO UPDATE SET
+            final_number = excluded.final_number,
+            assignment_method = excluded.assignment_method,
+            confidence = excluded.confidence,
+            needs_review = excluded.needs_review,
+            notes = excluded.notes",
+        params![image_id, confidence, notes],
+    )?;
+
+    tx.execute(
+        "UPDATE images SET status = 'ambiguous' WHERE id = ?1",
+        [image_id],
+    )?;
+
     tx.commit()?;
     Ok(())
 }

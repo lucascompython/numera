@@ -10,7 +10,10 @@ use super::db::{
     self, AssignmentRecord, ImageProcessingRecord, OcrRecord, ProcessingDb, StickerMatchRecord,
     VisualEmbeddingRecord,
 };
-use super::embedding::generate_visual_embedding;
+use super::embedding::{
+    EmbeddingProvider, VisualEmbeddingConfig, build_embedding_provider,
+    generate_visual_embedding_with_provider,
+};
 use super::event_config::EventConfig;
 use super::image_loader::discover_images;
 use super::number_cropper::crop_number_region;
@@ -29,6 +32,8 @@ pub struct FirstStageConfig {
     pub debug_mode: bool,
     pub reprocess: bool,
     pub thresholds: ProcessingThresholds,
+    pub visual_embedding: VisualEmbeddingConfig,
+    pub visual_matching: VisualMatcherConfig,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +81,7 @@ pub fn run_first_stage(
     let db = ProcessingDb::open(&config.db_path)?;
     let event = db.get_event(config.event_id)?;
     let _template_probe = StickerMatcher::new(event.clone())?;
+    let _embedding_probe = build_embedding_provider(&config.visual_embedding)?;
     let paths = discover_images(&config.source_dir)?;
     let total = paths.len();
     let completed = Arc::new(AtomicUsize::new(0));
@@ -119,10 +125,13 @@ pub fn run_first_stage(
 
     if !processed_ids.is_empty() {
         let mut conn = db.connect()?;
+        let mut visual_matching = config.visual_matching.clone();
+        visual_matching.model_name = config.visual_embedding.resolved_model_name();
+        visual_matching.debug_logging |= config.debug_mode;
         let _visual_summary = visual_matcher::run_anchor_visual_matching(
             &mut conn,
             config.event_id,
-            &VisualMatcherConfig::default(),
+            &visual_matching,
         )?;
         final_results.extend(sort_processed_images(&db, config, &processed_ids)?);
     }
@@ -138,12 +147,14 @@ struct Worker {
     debug_mode: bool,
     reprocess: bool,
     thresholds: ProcessingThresholds,
+    embedding_provider: Box<dyn EmbeddingProvider>,
 }
 
 impl Worker {
     fn new(config: &FirstStageConfig, event: EventConfig) -> Result<Self> {
         let conn = db::connect(&config.db_path)?;
         let matcher = StickerMatcher::new(event.clone())?;
+        let embedding_provider = build_embedding_provider(&config.visual_embedding)?;
         Ok(Self {
             conn,
             event,
@@ -152,6 +163,7 @@ impl Worker {
             debug_mode: config.debug_mode,
             reprocess: config.reprocess,
             thresholds: config.thresholds,
+            embedding_provider,
         })
     }
 
@@ -390,13 +402,17 @@ impl Worker {
         image_path: &Path,
         debug_paths: &DebugPaths,
     ) -> Option<VisualEmbeddingRecord> {
-        let generated =
-            generate_visual_embedding(image_path, debug_paths.visual_crop.as_deref()).ok()?;
+        let generated = generate_visual_embedding_with_provider(
+            self.embedding_provider.as_ref(),
+            image_path,
+            debug_paths.visual_crop.as_deref(),
+        )
+        .ok()?;
         Some(VisualEmbeddingRecord {
             image_id,
-            model_name: generated.model_name,
+            model_name: self.embedding_provider.model_name().to_string(),
             crop_path: generated.crop_path,
-            embedding: generated.values,
+            embedding: generated.embedding,
         })
     }
 }
@@ -527,6 +543,7 @@ fn summarize(discovered: usize, results: &[ImageRunResult]) -> FirstStageSummary
             "no_sticker_found" => summary.no_sticker_found += 1,
             "ocr_failed" => summary.ocr_failed += 1,
             "needs_review" => summary.needs_review += 1,
+            "ambiguous" => summary.needs_review += 1,
             _ => {}
         }
     }
