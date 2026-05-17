@@ -4,10 +4,13 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme, ElementExt, Sizable, h_flex, v_flex};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::state::{ConfidenceLevel, NumberingState};
+use super::state::NumberingState;
+use crate::numbering_session::{
+    AutonomousProgressSnapshot, NumberingSession, NumberingSessionChanges,
+};
 use crate::processing::image_cache::ImageCache;
 
 /// NumberingMode component that handles the image numbering workflow.
@@ -19,12 +22,22 @@ pub struct NumberingMode {
     preview_dimensions: Option<(u32, u32)>,
     image_view_size: Option<(f32, f32)>,
     preview_version: usize,
-    ocr_sweep_generation: Arc<std::sync::atomic::AtomicUsize>,
+    session: NumberingSession,
+    session_source_revision: u64,
+    session_completed_revision: u64,
+    session_autonomous_progress_revision: u64,
+    session_manual_open_revision: u64,
+    autonomous_progress: AutonomousProgressSnapshot,
     _subscriptions: Vec<Subscription>,
 }
 
 impl NumberingMode {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, image_cache: Arc<ImageCache>) -> Self {
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        image_cache: Arc<ImageCache>,
+        session: NumberingSession,
+    ) -> Self {
         let input_state =
             cx.new(|cx| InputState::new(window, cx).placeholder("Type motorcycle number..."));
 
@@ -40,7 +53,7 @@ impl NumberingMode {
             },
         ));
 
-        Self {
+        let mut this = Self {
             state: NumberingState::new(),
             input_state,
             image_cache,
@@ -48,9 +61,16 @@ impl NumberingMode {
             preview_dimensions: None,
             image_view_size: None,
             preview_version: 0,
-            ocr_sweep_generation: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            session,
+            session_source_revision: 0,
+            session_completed_revision: 0,
+            session_autonomous_progress_revision: 0,
+            session_manual_open_revision: 0,
+            autonomous_progress: AutonomousProgressSnapshot::default(),
             _subscriptions: subs,
-        }
+        };
+        this.start_session_sync(cx);
+        this
     }
 
     pub fn open_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -63,33 +83,12 @@ impl NumberingMode {
 
             if let Some(folder) = handle {
                 let dir = folder.path().to_path_buf();
-                let mut images: Vec<PathBuf> = std::fs::read_dir(&dir)
-                    .ok()
-                    .into_iter()
-                    .flat_map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()))
-                    .filter(|p| {
-                        matches!(
-                            p.extension()
-                                .and_then(|e| e.to_str())
-                                .map(|e| e.to_ascii_lowercase()),
-                            Some(ref ext) if ext == "jpg" || ext == "jpeg" || ext == "png"
-                        )
-                    })
-                    .collect();
-                images.sort();
 
                 entity.update(cx, |this, cx| {
-                    this.state.source_folder = Some(dir);
-                    this.state.image_paths = images;
-                    this.state.current_index = 0;
-                    this.state.undo_stack.clear();
-                    this.state.input_buffer.clear();
-                    this.state.status_message =
-                        format!("Loaded {} images", this.state.image_paths.len());
-
-                    // load first image immediately, then OCR the folder in reverse order
-                    this.load_current_image(cx);
-                    this.start_reverse_ocr_sweep(cx);
+                    let changes = this.session.set_source_dir(dir.clone());
+                    this.session_source_revision = changes.source_revision;
+                    this.session_completed_revision = changes.completed_revision;
+                    this.load_folder(dir, cx);
                     cx.notify();
                 });
             }
@@ -138,21 +137,134 @@ impl NumberingMode {
         cx.notify();
     }
 
+    fn open_autonomous_window(&mut self, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let opts = gpui::WindowOptions {
+            titlebar: Some(gpui::TitlebarOptions {
+                title: Some("Autonomous Numbering".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        match cx.open_window(opts, move |window, cx| {
+            let view = cx.new(|cx| {
+                crate::autonomous_numbering::AutonomousNumberingWindow::new(
+                    window,
+                    cx,
+                    session.clone(),
+                )
+            });
+            cx.new(|cx| gpui_component::Root::new(view, window, cx))
+        }) {
+            Ok(_) => {
+                self.state.status_message = "Autonomous numbering window opened".to_string();
+            }
+            Err(error) => {
+                self.state.status_message =
+                    format!("Failed to open autonomous numbering window: {error}");
+            }
+        }
+        cx.notify();
+    }
+
+    fn start_session_sync(&mut self, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let timer = cx.background_executor().clone();
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                timer.timer(std::time::Duration::from_millis(125)).await;
+                let changes = this
+                    .update(cx, |this, _| {
+                        session.changes_since(
+                            this.session_source_revision,
+                            this.session_completed_revision,
+                            this.session_autonomous_progress_revision,
+                            this.session_manual_open_revision,
+                        )
+                    })
+                    .unwrap_or_default();
+
+                if !changes.source_changed
+                    && changes.completed_paths.is_empty()
+                    && !changes.autonomous_progress_changed
+                    && changes.manual_open_path.is_none()
+                {
+                    continue;
+                }
+
+                _ = this.update(cx, |this, cx| {
+                    this.apply_session_changes(changes, cx);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn apply_session_changes(&mut self, changes: NumberingSessionChanges, cx: &mut Context<Self>) {
+        if changes.source_changed {
+            self.session_source_revision = changes.source_revision;
+            self.session_completed_revision = changes.completed_revision;
+            self.session_autonomous_progress_revision = changes.autonomous_progress_revision;
+            self.session_manual_open_revision = changes.manual_open_revision;
+            self.autonomous_progress = changes.autonomous_progress;
+            if let Some(source_dir) = changes.source_dir {
+                self.load_folder(source_dir, cx);
+            }
+            return;
+        }
+
+        if changes.autonomous_progress_changed {
+            self.session_autonomous_progress_revision = changes.autonomous_progress_revision;
+            self.autonomous_progress = changes.autonomous_progress;
+        }
+        if !changes.completed_paths.is_empty() {
+            self.remove_completed_paths(&changes.completed_paths, cx);
+        }
+        if let Some(path) = changes.manual_open_path {
+            self.open_review_image(path, cx);
+        }
+        self.session_completed_revision = changes.completed_revision;
+        self.session_manual_open_revision = changes.manual_open_revision;
+    }
+
+    fn load_folder(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        match crate::processing::autonomous_numbering::discover_numbering_images(&dir) {
+            Ok(images) => {
+                self.state.source_folder = Some(dir);
+                self.state.image_paths = images;
+                self.state.current_index = 0;
+                self.state.undo_stack.clear();
+                self.state.input_buffer.clear();
+                self.preview_image = None;
+                self.preview_dimensions = None;
+                self.state.status_message =
+                    format!("Loaded {} images", self.state.image_paths.len());
+
+                self.load_current_image(cx);
+            }
+            Err(error) => {
+                self.state.status_message = error;
+                self.state.image_paths.clear();
+                self.preview_image = None;
+                self.preview_dimensions = None;
+            }
+        }
+    }
+
     fn load_current_image(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.state.current_image().cloned() {
             self.preview_version = self.preview_version.wrapping_add(1);
             let version = self.preview_version;
             let cache = self.image_cache.clone();
             let preview_executor = cx.background_executor().clone();
-            let ocr_executor = preview_executor.clone();
-            let ocr_enabled = crate::ocr::is_ocr_available() || !crate::ocr::is_ocr_initialized();
             let preview_path = path.clone();
+            let missing_path = path.clone();
             self.state.pan_x = 0.0;
             self.state.pan_y = 0.0;
             self.state.is_dragging = false;
-
-            self.state.ocr_running = ocr_enabled;
-            self.state.ocr_suggestion = None;
 
             // Load and present preview as soon as possible, but keep decode/resize work off the UI executor.
             cx.spawn(async move |this, cx| {
@@ -180,92 +292,25 @@ impl NumberingMode {
 
                 _ = this.update(cx, |this, cx| {
                     if version == this.preview_version {
-                        this.preview_image = preview;
-                        this.preview_dimensions = dimensions;
+                        if let Some(preview) = preview {
+                            this.preview_image = Some(preview);
+                            this.preview_dimensions = dimensions;
+                        } else {
+                            this.remove_unavailable_image(&missing_path, cx);
+                        }
                     }
                     cx.notify();
                 });
             })
             .detach();
 
-            // OCR runs independently so image transitions stay snappy.
-            // Image decode + ONNX inference happen on the background executor, not the UI executor.
-            if ocr_enabled {
-                let ocr_path = path.clone();
-                cx.spawn(async move |this, cx| {
-                    let still_current = this
-                        .update(cx, |this, _| version == this.preview_version)
-                        .unwrap_or(false);
-                    if !still_current {
-                        return;
-                    }
-
-                    let ocr = ocr_executor
-                        .spawn(async move {
-                            if !crate::ocr::is_ocr_available() && crate::ocr::init_ocr().is_err() {
-                                return None;
-                            }
-
-                            crate::ocr::recognize_number_from_path(&ocr_path)
-                        })
-                        .await;
-
-                    _ = this.update(cx, |this, cx| {
-                        if version == this.preview_version {
-                            this.state.ocr_running = false;
-                            this.state.ocr_suggestion =
-                                ocr.map(|value| super::state::OcrSuggestion {
-                                    number: value.text,
-                                    confidence: value.confidence,
-                                });
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
-            } else {
-                self.state.ocr_running = false;
-            }
-
-            // Preload adjacent images and OCR
+            // Preload adjacent images so manual navigation stays responsive.
             self.preload_adjacent(cx);
         } else {
             self.preview_image = None;
             self.preview_dimensions = None;
-            self.state.ocr_running = false;
             cx.notify();
         }
-    }
-
-    fn start_reverse_ocr_sweep(&mut self, cx: &mut Context<Self>) {
-        if self.state.image_paths.is_empty() {
-            return;
-        }
-
-        let paths: Vec<PathBuf> = self.state.image_paths.iter().rev().cloned().collect();
-        let generation = self
-            .ocr_sweep_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .wrapping_add(1);
-        let cancel_generation = self.ocr_sweep_generation.clone();
-
-        cx.background_executor()
-            .spawn(async move {
-                if !crate::ocr::is_ocr_available() && crate::ocr::init_ocr().is_err() {
-                    return;
-                }
-
-                for path in paths {
-                    if cancel_generation.load(std::sync::atomic::Ordering::Relaxed) != generation {
-                        break;
-                    }
-
-                    if crate::ocr::get_cached_ocr(&path).is_none() {
-                        let _ = crate::ocr::recognize_number_from_path(&path);
-                    }
-                }
-            })
-            .detach();
     }
 
     fn preload_adjacent(&self, cx: &mut Context<Self>) {
@@ -325,17 +370,106 @@ impl NumberingMode {
                 })
                 .detach();
         }
+    }
 
-        // OCR work is handled by the current-image OCR task plus the reverse-order folder sweep.
+    fn remove_unavailable_image(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.remove_completed_paths(&[path.to_path_buf()], cx);
+    }
+
+    fn remove_completed_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if paths.is_empty() || self.state.image_paths.is_empty() {
+            return;
+        }
+
+        let current_path = self.state.current_image().cloned();
+        let mut removed_current = false;
+        let mut removed_count = 0usize;
+
+        for path in paths {
+            if let Some(position) = self
+                .state
+                .image_paths
+                .iter()
+                .position(|candidate| candidate == path)
+            {
+                if current_path.as_ref() == Some(path) {
+                    removed_current = true;
+                }
+
+                self.state.image_paths.remove(position);
+                removed_count += 1;
+
+                if position < self.state.current_index {
+                    self.state.current_index = self.state.current_index.saturating_sub(1);
+                } else if self.state.current_index >= self.state.image_paths.len()
+                    && self.state.current_index > 0
+                {
+                    self.state.current_index -= 1;
+                }
+            }
+        }
+
+        if removed_count == 0 {
+            return;
+        }
+
+        self.state.input_buffer.clear();
+        self.state.status_message = if removed_count == 1 {
+            "Removed 1 already-numbered image from the manual queue".to_string()
+        } else {
+            format!("Removed {removed_count} already-numbered images from the manual queue")
+        };
+
+        if removed_current {
+            self.preview_image = None;
+            self.preview_dimensions = None;
+            if !self.state.image_paths.is_empty() {
+                self.load_current_image(cx);
+            }
+        }
+    }
+
+    fn open_review_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !path.exists() {
+            self.state.status_message =
+                format!("Review image is no longer available: {}", path.display());
+            return;
+        }
+
+        let index = if let Some(index) = self
+            .state
+            .image_paths
+            .iter()
+            .position(|candidate| candidate == &path)
+        {
+            index
+        } else {
+            self.state.image_paths.insert(0, path.clone());
+            0
+        };
+
+        self.state.current_index = index;
+        self.state.input_buffer.clear();
+        self.state.status_message = format!(
+            "Opened review image: {}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image")
+        );
+        self.load_current_image(cx);
     }
 
     fn confirm_and_advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Get value from input state
         let value = self.input_state.read(cx).value().to_string();
         self.state.input_buffer = value;
+        let completed_path = self.state.current_image().cloned();
 
         match self.state.confirm_number() {
             Ok(()) => {
+                if let Some(completed_path) = completed_path {
+                    self.session.mark_completed(completed_path);
+                }
                 // Clear input and load next image
                 self.input_state.update(cx, |state, cx| {
                     state.set_value("", window, cx);
@@ -459,17 +593,6 @@ impl NumberingMode {
         }
     }
 
-    fn accept_ocr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ref suggestion) = self.state.ocr_suggestion {
-            let number = suggestion.number.clone();
-            self.input_state.update(cx, |state, cx| {
-                state.set_value(&number, window, cx);
-            });
-            self.state.input_buffer = number;
-        }
-        cx.notify();
-    }
-
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
         let (done, total) = self.state.progress();
@@ -504,6 +627,17 @@ impl NumberingMode {
                         let entity = entity.clone();
                         move |_, window, cx| {
                             entity.update(cx, |this, cx| this.open_sticker_template(window, cx));
+                        }
+                    }),
+            )
+            .child(
+                Button::new("open-autonomous-numbering")
+                    .label("Auto Window")
+                    .small()
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.open_autonomous_window(cx));
                         }
                     }),
             )
@@ -654,63 +788,6 @@ impl NumberingMode {
     fn render_input_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity().clone();
 
-        let ocr_element = if let Some(ref suggestion) = self.state.ocr_suggestion {
-            let (color, icon) = match suggestion.confidence_level() {
-                ConfidenceLevel::High => (hsla(0.33, 0.8, 0.45, 1.0), "✓"),
-                ConfidenceLevel::Medium => (hsla(0.12, 0.9, 0.5, 1.0), "⚠"),
-                ConfidenceLevel::Low => (hsla(0.0, 0.8, 0.5, 1.0), "✗"),
-            };
-            let confidence_pct = (suggestion.confidence * 100.0) as u32;
-
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("OCR:"),
-                )
-                .child(
-                    Button::new("accept-ocr")
-                        .label(format!("{} ({}%)", suggestion.number, confidence_pct))
-                        .small()
-                        .tab_index(-1)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |_, window, cx| {
-                                entity.update(cx, |this, cx| this.accept_ocr(window, cx));
-                            }
-                        }),
-                )
-                .child(div().text_base().text_color(color).child(icon))
-                .into_any_element()
-        } else if self.state.ocr_running {
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("Reading number...")
-                .into_any_element()
-        } else if !crate::ocr::is_ocr_initialized() {
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("OCR initializing...")
-                .into_any_element()
-        } else if !crate::ocr::is_ocr_available() {
-            div()
-                .text_sm()
-                .text_color(hsla(0.0, 0.85, 0.6, 1.0))
-                .child("OCR unavailable (missing model files)")
-                .into_any_element()
-        } else {
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("OCR: no guess for this image")
-                .into_any_element()
-        };
-
         h_flex()
             .px_3()
             .py_2()
@@ -740,12 +817,77 @@ impl NumberingMode {
                     }),
             )
             .child(div().flex_1())
-            .child(ocr_element)
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("Zoom: {:.0}%", self.state.zoom_level * 100.0)),
+            )
+    }
+
+    fn render_autonomous_progress(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let progress = &self.autonomous_progress;
+        let pct = if progress.total == 0 {
+            0.0
+        } else {
+            (progress.completed as f32 / progress.total as f32 * 100.0).clamp(0.0, 100.0)
+        };
+        let active = if progress.active_files.is_empty() {
+            "Idle".to_string()
+        } else {
+            progress.active_files.join(", ")
+        };
+
+        h_flex()
+            .px_3()
+            .py_1()
+            .gap_3()
+            .items_center()
+            .bg(cx.theme().background)
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if progress.running {
+                        "Autonomous running"
+                    } else {
+                        "Autonomous idle"
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "{}/{} assigned {} review {} done {} missing {} failed {}",
+                        progress.completed,
+                        progress.total,
+                        progress.assigned,
+                        progress.needs_review,
+                        progress.already_completed,
+                        progress.skipped_missing,
+                        progress.failed
+                    )),
+            )
+            .child(
+                div().w(px(160.)).child(
+                    gpui_component::progress::Progress::new("manual-auto-progress").value(pct),
+                ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if progress.last_message.is_empty() {
+                        active
+                    } else {
+                        format!("{} - {}", progress.last_message, active)
+                    }),
             )
     }
 
@@ -765,9 +907,7 @@ impl NumberingMode {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(
-                        "Scroll over image: zoom | Tab in number input: accept OCR | Ctrl+Z: undo",
-                    ),
+                    .child("Scroll over image: zoom | Ctrl+Z: undo"),
             )
     }
 }
@@ -788,15 +928,12 @@ impl Render for NumberingMode {
                         window.prevent_default();
                         cx.stop_propagation();
                         entity.update(cx, |this, cx| this.undo(cx));
-                    } else if key == "tab" {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        entity.update(cx, |this, cx| this.accept_ocr(window, cx));
                     }
                 }
             })
             .child(self.render_toolbar(cx))
             .child(self.render_image_view(cx))
+            .child(self.render_autonomous_progress(cx))
             .child(self.render_input_bar(cx))
             .child(self.render_status_bar(cx))
     }

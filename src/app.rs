@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::numbering_mode::NumberingMode;
+use crate::numbering_session::NumberingSession;
 use crate::processing::batch::{
     BatchConfig, OutputFormat, PosterOptions, ProcessResult, WatermarkConfig, WatermarkRotation,
     apply_preview_effects,
@@ -59,6 +60,8 @@ pub struct App {
     // Current mode
     mode: AppMode,
     numbering_mode: Entity<NumberingMode>,
+    numbering_session: NumberingSession,
+    numbering_session_open_revision: u64,
 
     // Shared image cache
     image_cache: Arc<ImageCache>,
@@ -135,10 +138,12 @@ pub struct App {
 impl App {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let image_cache = Arc::new(ImageCache::new(15));
+        let numbering_session = NumberingSession::new();
 
         let numbering_mode = {
             let cache = image_cache.clone();
-            cx.new(|cx| NumberingMode::new(window, cx, cache))
+            let session = numbering_session.clone();
+            cx.new(|cx| NumberingMode::new(window, cx, cache, session))
         };
 
         let quality_slider = cx.new(|_| {
@@ -466,9 +471,11 @@ impl App {
             },
         ));
 
-        Self {
+        let mut this = Self {
             mode: AppMode::BatchProcessing,
             numbering_mode,
+            numbering_session,
+            numbering_session_open_revision: 0,
             image_cache,
 
             image_paths: Vec::new(),
@@ -531,12 +538,35 @@ impl App {
             text_template_value: "{filename}".to_string(),
 
             _subscriptions: subs,
-        }
+        };
+        this.start_numbering_session_sync(cx);
+        this
     }
 
     fn set_mode(&mut self, mode: AppMode, cx: &mut Context<Self>) {
         self.mode = mode;
         cx.notify();
+    }
+
+    fn start_numbering_session_sync(&mut self, cx: &mut Context<Self>) {
+        let session = self.numbering_session.clone();
+        let timer = cx.background_executor().clone();
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                timer.timer(Duration::from_millis(125)).await;
+                let revision = session.manual_open_revision();
+
+                _ = this.update(cx, |this, cx| {
+                    if revision != this.numbering_session_open_revision {
+                        this.numbering_session_open_revision = revision;
+                        this.mode = AppMode::Numbering;
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     fn open_folder(&mut self, cx: &mut Context<Self>) {

@@ -518,11 +518,6 @@ fn candidate_score(len: usize, confidence: f32, count: usize, template_hits: usi
     confidence + len_bonus + repeat_bonus + template_bonus
 }
 
-/// Check if OCR initialization has completed, whether successfully or unsuccessfully.
-pub fn is_ocr_initialized() -> bool {
-    OCR_ENGINE.get().is_some()
-}
-
 /// Check if OCR is available
 pub fn is_ocr_available() -> bool {
     OCR_ENGINE.get().map(|e| e.is_some()).unwrap_or(false)

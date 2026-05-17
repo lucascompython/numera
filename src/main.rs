@@ -5,7 +5,9 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 mod app;
+mod autonomous_numbering;
 mod numbering_mode;
+mod numbering_session;
 mod ocr;
 mod processing;
 

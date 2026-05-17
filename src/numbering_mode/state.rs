@@ -10,32 +10,6 @@ pub struct MoveOperation {
     pub number: String,
 }
 
-/// OCR suggestion with confidence score.
-#[derive(Clone, Debug, Default)]
-pub struct OcrSuggestion {
-    pub number: String,
-    pub confidence: f32, // 0.0 to 1.0
-}
-
-impl OcrSuggestion {
-    pub fn confidence_level(&self) -> ConfidenceLevel {
-        if self.confidence >= 0.85 {
-            ConfidenceLevel::High
-        } else if self.confidence >= 0.60 {
-            ConfidenceLevel::Medium
-        } else {
-            ConfidenceLevel::Low
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConfidenceLevel {
-    High,   // >= 85%
-    Medium, // 60-84%
-    Low,    // < 60%
-}
-
 /// State for the numbering mode.
 pub struct NumberingState {
     /// Source folder path
@@ -65,12 +39,6 @@ pub struct NumberingState {
     /// Undo stack
     pub undo_stack: Vec<MoveOperation>,
 
-    /// Current OCR suggestion (if available)
-    pub ocr_suggestion: Option<OcrSuggestion>,
-
-    /// Whether OCR is currently running
-    pub ocr_running: bool,
-
     /// Status message
     pub status_message: String,
 }
@@ -89,8 +57,6 @@ impl Default for NumberingState {
             drag_start_x: 0.0,
             drag_start_y: 0.0,
             undo_stack: Vec::new(),
-            ocr_suggestion: None,
-            ocr_running: false,
             status_message: "Open a folder to begin numbering".into(),
         }
     }
@@ -111,7 +77,6 @@ impl NumberingState {
         if self.current_index + 1 < self.image_paths.len() {
             self.current_index += 1;
             self.input_buffer.clear();
-            self.ocr_suggestion = None;
         }
     }
 
@@ -120,7 +85,6 @@ impl NumberingState {
         if self.current_index > 0 {
             self.current_index -= 1;
             self.input_buffer.clear();
-            self.ocr_suggestion = None;
         }
     }
 
@@ -194,7 +158,6 @@ impl NumberingState {
 
         // Clear input for next image
         self.input_buffer.clear();
-        self.ocr_suggestion = None;
 
         if self.image_paths.is_empty() {
             self.status_message = "All images processed!".into();
@@ -220,13 +183,6 @@ impl NumberingState {
 
         self.status_message = format!("Undid move of {}", op.number);
         Ok(())
-    }
-
-    /// Accept the OCR suggestion as input.
-    pub fn accept_ocr_suggestion(&mut self) {
-        if let Some(ref suggestion) = self.ocr_suggestion {
-            self.input_buffer = suggestion.number.clone();
-        }
     }
 
     /// Get progress as (current, total).
