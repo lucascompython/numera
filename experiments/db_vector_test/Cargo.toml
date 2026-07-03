@@ -1,0 +1,10 @@
+[package]
+name = "db_vector_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+libsql = { version = "0.9.30", features = ["core"] }
+tokio = { version = "1", features = ["full"] }
+turso = "0.7.0-pre.17"
