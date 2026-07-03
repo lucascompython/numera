@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 
 use super::image_ops::{self, Rotation, TextOverlayConfig, TextPosition};
+use image::GenericImageView;
 
 /// What format to export as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,21 +243,57 @@ fn apply_effects_internal(
     shared_watermark_stamp: Option<&image::RgbaImage>,
     preview_mode: bool,
 ) -> image::DynamicImage {
+    // Export path needs to upscale fixed-pixel values (font sizes, margins,
+    // watermark scale) so they match what the user sees in the preview.
+    //
+    // Two factors:
+    //   1. poster_scale — the poster resize upscales the image from source
+    //      resolution to 3898 px short side.  Stamps must scale proportionally.
+    //   2. dpi_scale — font_size is in pixels, which at 300 DPI are physically
+    //      tiny (24 px → 5.76 pt).  The preview shows the image at screen
+    //      resolution where the same pixels look much larger.  Converting by
+    //      dpi/72 treats font_size as points: 24 pt → 100 px at 300 DPI.
+    let poster_scale: f32 = if config.poster.resize_to_33x66cm && !preview_mode {
+        let (w, h) = img.dimensions();
+        let cropped_short = if w >= h {
+            (h as f32).min(w as f32 / 2.0)
+        } else {
+            (w as f32).min(h as f32 / 2.0)
+        };
+        if cropped_short <= 0.0 { 1.0 } else { 3898.0 / cropped_short }
+    } else {
+        1.0
+    };
+    let dpi_scale: f32 = if !preview_mode && config.output_format == OutputFormat::Pdf {
+        300.0 / 72.0
+    } else {
+        1.0
+    };
+    let scale = poster_scale * dpi_scale;
+
     if config.poster.resize_to_33x66cm {
         img = if preview_mode {
-            // Preview fast-path: keep current decoded resolution and only apply centered aspect crop.
             image_ops::crop_to_33x66cm_poster_aspect(img)
         } else {
             image_ops::resize_to_33x66cm_poster(img)
         };
     }
     if config.poster.margin_px > 0 {
-        img = image_ops::add_white_border(img, config.poster.margin_px);
+        let scaled_margin = (config.poster.margin_px as f32 * scale).round() as u32;
+        img = image_ops::add_white_border(img, scaled_margin);
     }
 
-    // Apply text overlay using cached stamp when possible
+    // Text overlay — re-render at scaled size (poster upscale + DPI compensation)
     if let Some(ref text_config) = config.text_overlay {
-        if let Some(stamp) = shared_text_stamp {
+        if scale != 1.0 {
+            let scaled_config = TextOverlayConfig {
+                font_size: text_config.font_size * scale,
+                margin: (text_config.margin as f32 * scale).round() as u32,
+                ..text_config.clone()
+            };
+            let stamp = image_ops::render_text_stamp(&scaled_config, filename);
+            img = image_ops::overlay_text_with_stamp(img, &scaled_config, &stamp);
+        } else if let Some(stamp) = shared_text_stamp {
             img = image_ops::overlay_text_with_stamp(img, text_config, stamp);
         } else {
             let stamp = image_ops::render_text_stamp(text_config, filename);
@@ -264,9 +301,24 @@ fn apply_effects_internal(
         }
     }
 
-    // apply watermark (after text)
+    // Watermark — reload at scaled size (poster upscale + DPI compensation)
     if let Some(ref watermark) = config.watermark {
-        if let Some(stamp) = shared_watermark_stamp {
+        if scale != 1.0 {
+            let scaled_margin = (watermark.margin as f32 * scale).round() as u32;
+            if let Ok(stamp) = image_ops::load_watermark_stamp(
+                &watermark.image_path,
+                watermark.opacity,
+                watermark.scale_percent * scale,
+                watermark.rotation.resolve(config.rotation),
+            ) {
+                img = image_ops::overlay_stamp_with_position(
+                    img,
+                    watermark.position,
+                    scaled_margin,
+                    &stamp,
+                );
+            }
+        } else if let Some(stamp) = shared_watermark_stamp {
             img = image_ops::overlay_stamp_with_position(
                 img,
                 watermark.position,
