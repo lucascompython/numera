@@ -29,12 +29,12 @@ use crate::processing::sort::{
 };
 
 #[derive(Clone, Debug)]
-struct SelectOption<V: Clone> {
+struct SelectOption<V: Clone + PartialEq> {
     label: SharedString,
     value: V,
 }
 
-impl<V: Clone + 'static> SelectItem for SelectOption<V> {
+impl<V: Clone + PartialEq + 'static> SelectItem for SelectOption<V> {
     type Value = V;
     fn title(&self) -> SharedString {
         self.label.clone()
@@ -320,9 +320,10 @@ impl App {
             &quality_slider,
             window,
             |this, _, ev: &SliderEvent, _window, cx| {
-                let SliderEvent::Change(val) = ev;
-                this.quality = val.start() as u8;
-                cx.notify();
+                if let SliderEvent::Change(val) = ev {
+                    this.quality = val.start() as u8;
+                    cx.notify();
+                }
             },
         ));
 
@@ -330,60 +331,66 @@ impl App {
             &font_size_slider,
             window,
             |this, _, ev: &SliderEvent, _window, cx| {
-                let SliderEvent::Change(val) = ev;
-                this.text_font_size = val.start();
-                this.schedule_preview_update(cx);
-                cx.notify();
+                if let SliderEvent::Change(val) = ev {
+                    this.text_font_size = val.start();
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                }
             },
         ));
         subs.push(cx.subscribe_in(
             &text_margin_slider,
             window,
             |this, _, ev: &SliderEvent, _window, cx| {
-                let SliderEvent::Change(val) = ev;
-                this.text_edge_margin = val.start() as u32;
-                this.schedule_preview_update(cx);
-                cx.notify();
+                if let SliderEvent::Change(val) = ev {
+                    this.text_edge_margin = val.start() as u32;
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                }
             },
         ));
         subs.push(cx.subscribe_in(
             &poster_margin_slider,
             window,
             |this, _, ev: &SliderEvent, _window, cx| {
-                let SliderEvent::Change(val) = ev;
-                this.poster_margin_px = val.start() as u32;
-                this.schedule_preview_update(cx);
-                cx.notify();
+                if let SliderEvent::Change(val) = ev {
+                    this.poster_margin_px = val.start() as u32;
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                }
             },
         ));
         subs.push(cx.subscribe_in(
             &watermark_margin_slider,
             window,
             |this, _, ev: &SliderEvent, _window, cx| {
-                let SliderEvent::Change(val) = ev;
-                this.watermark_edge_margin = val.start() as u32;
-                this.schedule_preview_update(cx);
-                cx.notify();
+                if let SliderEvent::Change(val) = ev {
+                    this.watermark_edge_margin = val.start() as u32;
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                }
             },
         ));
         subs.push(cx.subscribe_in(
             &watermark_scale_slider,
             window,
             |this, _, ev: &SliderEvent, _window, cx| {
-                let SliderEvent::Change(val) = ev;
-                this.watermark_scale_percent = val.start();
-                this.schedule_preview_update(cx);
-                cx.notify();
+                if let SliderEvent::Change(val) = ev {
+                    this.watermark_scale_percent = val.start();
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                }
             },
         ));
         subs.push(cx.subscribe_in(
             &watermark_opacity_slider,
             window,
             |this, _, ev: &SliderEvent, _window, cx| {
-                let SliderEvent::Change(val) = ev;
-                this.watermark_opacity = val.start();
-                this.schedule_preview_update(cx);
-                cx.notify();
+                if let SliderEvent::Change(val) = ev {
+                    this.watermark_opacity = val.start();
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                }
             },
         ));
 
