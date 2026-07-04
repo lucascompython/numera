@@ -206,7 +206,7 @@ fn build_min_size(args: MinSizeArgs) -> Result<(), Box<dyn Error>> {
         } else if cfg!(target_os = "linux") {
             "x86_64-unknown-linux-gnu"
         } else if cfg!(target_os = "macos") {
-            "x86_64-apple-darwin"
+            "aarch64-apple-darwin"
         } else {
             panic!("Unsupported host OS");
         }
@@ -249,7 +249,7 @@ fn build_speed(args: SpeedArgs) -> Result<(), Box<dyn Error>> {
         } else if cfg!(target_os = "linux") {
             "x86_64-unknown-linux-gnu"
         } else if cfg!(target_os = "macos") {
-            "x86_64-apple-darwin"
+            "aarch64-apple-darwin"
         } else {
             panic!("Unsupported host OS");
         }

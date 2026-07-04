@@ -5,9 +5,15 @@ edition = "2024"
 
 default-run = "numera"
 
-[dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+[target.'cfg(target_arch = "aarch64-apple-darwin")'.dependencies]
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+
+[target.'cfg(not(target_arch = "aarch64-apple-darwin"))'.dependencies]
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "x11", "wayland"] }
+
+[dependencies]
+# TODO: update gpui
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
 gpui-component = { git = "https://github.com/longbridgeapp/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridgeapp/gpui-component" }
 image = { version = "0.25", default-features = false, features = ["rayon", "jpeg", "png"] }
@@ -52,6 +58,8 @@ ocr-directml = ["oar-ocr/directml"]
 ocr-coreml = ["oar-ocr/coreml"]
 ocr-openvino = ["oar-ocr/openvino"]
 ocr-webgpu = ["oar-ocr/webgpu"]
+
+
 
 [[bin]]
 name = "jpeg_bench"
