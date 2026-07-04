@@ -400,7 +400,13 @@ pub fn crop_to_aspect_centered(img: DynamicImage, target_ratio: f32) -> DynamicI
     }
 }
 
-pub fn add_white_border(img: DynamicImage, border_px: u32) -> DynamicImage {
+/// Add a white border by shrinking the image content within the current canvas.
+///
+/// The output image has the **same pixel dimensions** as the input — the content
+/// is shrunk by `border_px` on each side and centered on a white background.
+/// This ensures the final PDF stays at exactly 33×66 cm when used with poster
+/// images that are already at the target resolution.
+pub fn add_white_border_shrink(img: DynamicImage, border_px: u32) -> DynamicImage {
     if border_px == 0 {
         return img;
     }
@@ -408,12 +414,76 @@ pub fn add_white_border(img: DynamicImage, border_px: u32) -> DynamicImage {
     if w == 0 || h == 0 {
         return img;
     }
-    let out_w = w.saturating_add(border_px.saturating_mul(2));
-    let out_h = h.saturating_add(border_px.saturating_mul(2));
-    let mut canvas = RgbaImage::from_pixel(out_w, out_h, image::Rgba([255, 255, 255, 255]));
-    let src = img.to_rgba8();
-    image::imageops::overlay(&mut canvas, &src, border_px as i64, border_px as i64);
+    let inner_w = w.saturating_sub(border_px.saturating_mul(2));
+    let inner_h = h.saturating_sub(border_px.saturating_mul(2));
+    if inner_w == 0 || inner_h == 0 {
+        // Border fills the entire canvas — return a white image.
+        let canvas = RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
+        return DynamicImage::ImageRgba8(canvas);
+    }
+
+    // Fit the image within the inner area while preserving aspect ratio.
+    let img_ratio = w as f32 / h as f32;
+    let inner_ratio = inner_w as f32 / inner_h as f32;
+    let (fit_w, fit_h) = if img_ratio > inner_ratio {
+        (inner_w, (inner_w as f32 / img_ratio).round().max(1.0) as u32)
+    } else {
+        ((inner_h as f32 * img_ratio).round().max(1.0) as u32, inner_h)
+    };
+
+    let resized =
+        img.resize_exact(fit_w, fit_h, image::imageops::FilterType::Triangle);
+
+    let mut canvas = RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
+    let offset_x = ((inner_w - fit_w) / 2 + border_px) as i64;
+    let offset_y = ((inner_h - fit_h) / 2 + border_px) as i64;
+    image::imageops::overlay(&mut canvas, &resized.to_rgba8(), offset_x, offset_y);
     DynamicImage::ImageRgba8(canvas)
+}
+
+/// Add a white border that **overlaps** the image edges.
+///
+/// White rectangles are drawn directly on top of the image content — the image
+/// dimensions stay the same. This keeps the final PDF at exactly 33×66 cm.
+pub fn add_white_border_overlap(img: DynamicImage, border_px: u32) -> DynamicImage {
+    if border_px == 0 {
+        return img;
+    }
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return img;
+    }
+    let b = border_px.min(w / 2).min(h / 2);
+    let white = image::Rgba([255, 255, 255, 255]);
+
+    let mut rgba = img.to_rgba8();
+
+    // Top edge
+    for y in 0..b {
+        for x in 0..w {
+            rgba[(x, y)] = white;
+        }
+    }
+    // Bottom edge
+    for y in (h - b)..h {
+        for x in 0..w {
+            rgba[(x, y)] = white;
+        }
+    }
+    // Left edge (exclude corners)
+    for y in b..(h - b) {
+        for x in 0..b {
+            rgba[(x, y)] = white;
+        }
+    }
+    // Right edge (exclude corners)
+    for y in b..(h - b) {
+        for x in (w - b)..w {
+            rgba[(x, y)] = white;
+        }
+    }
+
+    DynamicImage::ImageRgba8(rgba)
 }
 
 pub fn load_watermark_stamp(

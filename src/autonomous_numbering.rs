@@ -92,7 +92,7 @@ impl AutonomousNumberingWindow {
 
             if let Some(folder) = handle {
                 let dir = folder.path().to_path_buf();
-                _ = entity.update(cx, |this, cx| {
+                entity.update(cx, |this, cx| {
                     let changes = this.session.set_source_dir(dir);
                     this.apply_session_changes(changes);
                     cx.notify();

@@ -207,23 +207,23 @@ fn evaluate_candidate(
 
     let agreement = winner.votes as f32 / scored.len().max(1) as f32;
     let conflict = strongest_conflict(&ranked_numbers, winner.number.as_str());
-    if let Some(conflict) = conflict.as_ref() {
-        if conflict.best_similarity >= config.max_conflicting_anchor_similarity {
-            return VisualDecision::Ambiguous {
-                image_id: candidate.image_id,
-                confidence: conflict.best_similarity,
-                notes: format!(
-                    "conflicting anchor number {} similarity {:.3} exceeds max_conflicting_anchor_similarity {:.3}; winner={} agreement={:.2}; previous_status={}",
-                    conflict.number,
-                    conflict.best_similarity,
-                    config.max_conflicting_anchor_similarity,
-                    winner.number,
-                    agreement,
-                    candidate.status
-                ),
-                matches,
-            };
-        }
+    if let Some(conflict) = conflict.as_ref()
+        && conflict.best_similarity >= config.max_conflicting_anchor_similarity
+    {
+        return VisualDecision::Ambiguous {
+            image_id: candidate.image_id,
+            confidence: conflict.best_similarity,
+            notes: format!(
+                "conflicting anchor number {} similarity {:.3} exceeds max_conflicting_anchor_similarity {:.3}; winner={} agreement={:.2}; previous_status={}",
+                conflict.number,
+                conflict.best_similarity,
+                config.max_conflicting_anchor_similarity,
+                winner.number,
+                agreement,
+                candidate.status
+            ),
+            matches,
+        };
     }
 
     if agreement < config.min_topk_agreement {

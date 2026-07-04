@@ -14,10 +14,22 @@ pub enum OutputFormat {
     Pdf,
 }
 
+
+/// How the white border is applied to a 33×66 cm poster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderMode {
+    /// Shrink the image content so the border fits within the 33×66 cm canvas.
+    #[default]
+    Shrink,
+    /// Draw the white border on top of the image edges (overlapping).
+    Overlap,
+}
+
 #[derive(Default)]
 pub struct PosterOptions {
     pub resize_to_33x66cm: bool,
     pub margin_px: u32,
+    pub border_mode: BorderMode,
 }
 
 pub struct WatermarkConfig {
@@ -33,12 +45,6 @@ pub struct WatermarkConfig {
 pub enum WatermarkRotation {
     MatchImage,
     Fixed(Rotation),
-}
-
-impl Default for WatermarkRotation {
-    fn default() -> Self {
-        Self::MatchImage
-    }
 }
 
 impl WatermarkRotation {
@@ -260,7 +266,11 @@ fn apply_effects_internal(
         } else {
             (w as f32).min(h as f32 / 2.0)
         };
-        if cropped_short <= 0.0 { 1.0 } else { 3898.0 / cropped_short }
+        if cropped_short <= 0.0 {
+            1.0
+        } else {
+            3898.0 / cropped_short
+        }
     } else {
         1.0
     };
@@ -280,7 +290,10 @@ fn apply_effects_internal(
     }
     if config.poster.margin_px > 0 {
         let scaled_margin = (config.poster.margin_px as f32 * scale).round() as u32;
-        img = image_ops::add_white_border(img, scaled_margin);
+        img = match config.poster.border_mode {
+            BorderMode::Shrink => image_ops::add_white_border_shrink(img, scaled_margin),
+            BorderMode::Overlap => image_ops::add_white_border_overlap(img, scaled_margin),
+        };
     }
 
     // Text overlay — re-render at scaled size (poster upscale + DPI compensation)

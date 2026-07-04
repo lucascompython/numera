@@ -19,8 +19,8 @@ use std::time::Duration;
 use crate::numbering_mode::NumberingMode;
 use crate::numbering_session::NumberingSession;
 use crate::processing::batch::{
-    BatchConfig, OutputFormat, PosterOptions, ProcessResult, WatermarkConfig, WatermarkRotation,
-    apply_preview_effects,
+    BatchConfig, BorderMode, OutputFormat, PosterOptions, ProcessResult, WatermarkConfig,
+    WatermarkRotation, apply_preview_effects,
 };
 use crate::processing::image_cache::ImageCache;
 use crate::processing::image_ops::{Rotation, TextColor, TextOverlayConfig, TextPosition};
@@ -48,6 +48,7 @@ type FormatSelectState = SelectState<Vec<SelectOption<OutputFormat>>>;
 type RotationSelectState = SelectState<Vec<SelectOption<Rotation>>>;
 type WatermarkRotationSelectState = SelectState<Vec<SelectOption<WatermarkRotation>>>;
 type PositionSelectState = SelectState<Vec<SelectOption<TextPosition>>>;
+type BorderModeSelectState = SelectState<Vec<SelectOption<BorderMode>>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AppMode {
@@ -90,6 +91,7 @@ pub struct App {
     text_color_b: u8,
     poster_resize_33x66: bool,
     poster_margin_enabled: bool,
+    border_mode: BorderMode,
     poster_margin_px: u32,
     watermark_enabled: bool,
     watermark_image_path: Option<PathBuf>,
@@ -123,6 +125,7 @@ pub struct App {
     watermark_scale_slider: Entity<SliderState>,
     watermark_opacity_slider: Entity<SliderState>,
     format_select: Entity<FormatSelectState>,
+    border_mode_select: Entity<BorderModeSelectState>,
     rotation_select: Entity<RotationSelectState>,
     watermark_rotation_select: Entity<WatermarkRotationSelectState>,
     settings_scroll_handle: ScrollHandle,
@@ -209,6 +212,25 @@ impl App {
         ];
         let format_select = cx.new(|cx| {
             SelectState::new(format_items, Some(IndexPath::default().row(1)), window, cx)
+        });
+
+        let border_mode_items = vec![
+            SelectOption {
+                label: "Shrink image".into(),
+                value: BorderMode::Shrink,
+            },
+            SelectOption {
+                label: "Overlap edges".into(),
+                value: BorderMode::Overlap,
+            },
+        ];
+        let border_mode_select = cx.new(|cx| {
+            SelectState::new(
+                border_mode_items,
+                Some(IndexPath::default().row(0)),
+                window,
+                cx,
+            )
         });
 
         let rotation_items = vec![
@@ -406,6 +428,18 @@ impl App {
         ));
 
         subs.push(cx.subscribe_in(
+            &border_mode_select,
+            window,
+            |this, _, ev: &SelectEvent<Vec<SelectOption<BorderMode>>>, _window, cx| {
+                if let SelectEvent::Confirm(Some(value)) = ev {
+                    this.border_mode = *value;
+                    this.schedule_preview_update(cx);
+                    cx.notify();
+                }
+            },
+        ));
+
+        subs.push(cx.subscribe_in(
             &rotation_select,
             window,
             |this, _, ev: &SelectEvent<Vec<SelectOption<Rotation>>>, _window, cx| {
@@ -506,6 +540,7 @@ impl App {
             poster_resize_33x66: false,
             poster_margin_enabled: false,
             poster_margin_px: 40,
+            border_mode: BorderMode::default(),
             watermark_enabled: false,
             watermark_image_path: None,
             watermark_position: TextPosition::Center,
@@ -535,6 +570,7 @@ impl App {
             watermark_scale_slider,
             watermark_opacity_slider,
             format_select,
+            border_mode_select,
             rotation_select,
             watermark_rotation_select,
             settings_scroll_handle: ScrollHandle::new(),
@@ -998,6 +1034,7 @@ impl App {
             } else {
                 0
             },
+            border_mode: self.border_mode,
         }
     }
 
@@ -1441,6 +1478,12 @@ impl App {
                             });
                         }
                     }),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(section_title("Border Mode"))
+                    .child(self.border_mode_select.clone()),
             )
             .child(
                 Checkbox::new("poster-margin")
