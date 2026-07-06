@@ -55,7 +55,7 @@ impl CacheKey {
 
 type RapidBuildHasher = BuildHasherDefault<RapidHasher<'static>>;
 
-const DEFAULT_PREVIEW_MAX_SIDE: u32 = 2400;
+const DEFAULT_PREVIEW_MAX_SIDE: u32 = 3200;
 const MIN_PREVIEW_MAX_SIDE: u32 = 512;
 const MAX_PREVIEW_MAX_SIDE: u32 = 8192;
 
