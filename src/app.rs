@@ -1748,7 +1748,7 @@ impl Render for App {
             .child(
                 tab_style(is_batch, &theme)
                     .id("tab-batch")
-                    .child("Batch Processing")
+                    .child("Poster")
                     .on_click({
                         let entity = entity.clone();
                         move |_, _, cx| {
