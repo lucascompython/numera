@@ -1,5 +1,7 @@
 //! State management for numbering mode.
 
+use rapidhash::fast::HashMapExt;
+use rapidhash::fast::RapidHashMap as HashMap;
 use std::path::PathBuf;
 
 /// Represents a completed file move operation for undo support.
@@ -8,6 +10,7 @@ pub struct MoveOperation {
     pub original_path: PathBuf,
     pub new_path: PathBuf,
     pub number: String,
+    pub parsed_number: Option<u32>,
 }
 
 /// State for the numbering mode.
@@ -41,6 +44,14 @@ pub struct NumberingState {
 
     /// Status message
     pub status_message: String,
+
+    /// Whether to move files to the numbered folder
+    pub move_to_folder: bool,
+    /// Whether to rename files to the number
+    pub rename_to_number: bool,
+
+    /// Track number → next suffix count (0 = no suffix, 1 = "(2)", etc.)
+    number_counts: HashMap<u32, u32>,
 }
 
 impl Default for NumberingState {
@@ -58,6 +69,9 @@ impl Default for NumberingState {
             drag_start_y: 0.0,
             undo_stack: Vec::new(),
             status_message: "Open a folder to begin numbering".into(),
+            move_to_folder: true,
+            rename_to_number: false,
+            number_counts: HashMap::new(),
         }
     }
 }
@@ -111,7 +125,7 @@ impl NumberingState {
         self.pan_y += dy;
     }
 
-    /// Process number input and move file.
+    /// Process number input and move/rename file.
     /// Returns Ok(()) if successful, Err with message otherwise.
     pub fn confirm_number(&mut self) -> Result<(), String> {
         let number = self.input_buffer.trim().to_string();
@@ -119,33 +133,65 @@ impl NumberingState {
             return Err("Please enter a number".into());
         }
 
+        if !self.move_to_folder && !self.rename_to_number {
+            return Err("Enable 'Move to folder' or 'Rename to number' (or both)".into());
+        }
+
         let source_folder = self.source_folder.as_ref().ok_or("No folder selected")?;
         let current_path = self.current_image().ok_or("No image selected")?.clone();
 
-        // Create target folder: <source_folder>/<number>/
-        let target_folder = source_folder.join(&number);
-        if !target_folder.exists() {
-            std::fs::create_dir_all(&target_folder)
+        let extension = current_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("jpg");
+
+        let target_dir = if self.move_to_folder {
+            let folder = source_folder.join(&number);
+            std::fs::create_dir_all(&folder)
                 .map_err(|e| format!("Failed to create folder: {e}"))?;
-        }
+            folder
+        } else {
+            source_folder.clone()
+        };
 
-        // Move file keeping original filename
-        let filename = current_path.file_name().ok_or("Invalid filename")?;
-        let target_path = target_folder.join(filename);
+        let parsed_number: Option<u32>;
 
-        // Check if target already exists
-        if target_path.exists() {
-            return Err(format!("File already exists: {}", target_path.display()));
-        }
+        let target_filename = if self.rename_to_number {
+            parsed_number = Some(
+                number
+                    .parse::<u32>()
+                    .map_err(|_| format!("'{number}' is not a valid number"))?,
+            );
+            let count = self
+                .number_counts
+                .entry(unsafe { parsed_number.unwrap_unchecked() })
+                .or_insert(0);
+            let suffix = *count;
+            *count += 1;
+            if suffix == 0 {
+                format!("{number}.{extension}")
+            } else {
+                format!("{number} ({}).{extension}", suffix + 1)
+            }
+        } else {
+            parsed_number = None;
+            current_path
+                .file_name()
+                .ok_or("Invalid filename")?
+                .to_string_lossy()
+                .into_owned()
+        };
+        let target_path = target_dir.join(&target_filename);
 
         std::fs::rename(&current_path, &target_path)
             .map_err(|e| format!("Failed to move file: {e}"))?;
 
         // Record for undo
         self.undo_stack.push(MoveOperation {
-            original_path: current_path.clone(),
+            original_path: current_path,
             new_path: target_path,
             number: number.clone(),
+            parsed_number,
         });
 
         // Remove from list and advance
@@ -162,8 +208,13 @@ impl NumberingState {
         if self.image_paths.is_empty() {
             self.status_message = "All images processed!".into();
         } else {
-            self.status_message =
-                format!("Moved to {}/. {} remaining", number, self.image_paths.len());
+            let action = match (self.move_to_folder, self.rename_to_number) {
+                (true, true) => format!("Moved and renamed to {target_filename} in {number}/"),
+                (true, false) => format!("Moved to {number}/"),
+                (false, true) => format!("Renamed to {target_filename}"),
+                (false, false) => unreachable!(),
+            };
+            self.status_message = format!("{action}. {} remaining", self.image_paths.len());
         }
 
         Ok(())
@@ -176,6 +227,16 @@ impl NumberingState {
         // Move file back
         std::fs::rename(&op.new_path, &op.original_path)
             .map_err(|e| format!("Failed to undo: {e}"))?;
+
+        // Decrement the count for this number if it was renamed
+        if let Some(num) = op.parsed_number
+            && let Some(count) = self.number_counts.get_mut(&num)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.number_counts.remove(&num);
+            }
+        }
 
         // Re-add to image list at current position
         self.image_paths

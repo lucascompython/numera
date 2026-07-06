@@ -2,6 +2,7 @@
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme, ElementExt, Sizable, h_flex, v_flex};
 use std::path::{Path, PathBuf};
@@ -638,6 +639,40 @@ impl NumberingMode {
                         let entity = entity.clone();
                         move |_, _, cx| {
                             entity.update(cx, |this, cx| this.open_autonomous_window(cx));
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .w_px()
+                    .h_5()
+                    .bg(cx.theme().border),
+            )
+            .child(
+                Checkbox::new("move-to-folder")
+                    .checked(self.state.move_to_folder)
+                    .label("Move to folder")
+                    .on_click({
+                        let entity = entity.clone();
+                        move |checked, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.state.move_to_folder = *checked;
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(
+                Checkbox::new("rename-to-number")
+                    .checked(self.state.rename_to_number)
+                    .label("Rename to number")
+                    .on_click({
+                        let entity = entity.clone();
+                        move |checked, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.state.rename_to_number = *checked;
+                                cx.notify();
+                            });
                         }
                     }),
             )
