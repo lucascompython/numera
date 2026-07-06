@@ -249,6 +249,17 @@ fn apply_effects_internal(
     shared_watermark_stamp: Option<&image::RgbaImage>,
     preview_mode: bool,
 ) -> image::DynamicImage {
+    // Resize first so all images are at the target poster dimensions (3898×7795 px).
+    // This ensures subsequent operations (text, watermark) are applied to a
+    // consistently-sized canvas, giving uniform results across all images.
+    if config.poster.resize_to_33x66cm {
+        img = if preview_mode {
+            image_ops::crop_to_33x66cm_poster_aspect(img)
+        } else {
+            image_ops::resize_to_33x66cm_poster(img)
+        };
+    }
+
     // Export path needs to upscale fixed-pixel values (font sizes, margins,
     // watermark scale) so they match what the user sees in the preview.
     //
@@ -280,14 +291,6 @@ fn apply_effects_internal(
         1.0
     };
     let scale = poster_scale * dpi_scale;
-
-    if config.poster.resize_to_33x66cm {
-        img = if preview_mode {
-            image_ops::crop_to_33x66cm_poster_aspect(img)
-        } else {
-            image_ops::resize_to_33x66cm_poster(img)
-        };
-    }
     if config.poster.margin_px > 0 {
         let scaled_margin = (config.poster.margin_px as f32 * scale).round() as u32;
         img = match config.poster.border_mode {
