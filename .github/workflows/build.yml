@@ -71,7 +71,7 @@ jobs:
 
       - name: Install dependencies via vcpkg
         run: |
-          vcpkg install opencv4[turbojpeg,world]:x64-windows
+          vcpkg install opencv4[jpeg,world]:x64-windows
         shell: pwsh
 
       - uses: Swatinem/rust-cache@v2
