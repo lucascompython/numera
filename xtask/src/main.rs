@@ -257,7 +257,8 @@ fn build_speed(args: SpeedArgs) -> Result<(), Box<dyn Error>> {
 
     let project_root = env::current_dir()?;
 
-    let mut rustflags = "-Copt-level=3 -Csymbol-mangling-version=v0 -Zunstable-options -Cdebuginfo=0 -Cpanic=immediate-abort -Zfmt-debug=none -Zlocation-detail=none -Clink-args=-fuse-ld=lld -Clink-args=-Wl,--icf=all,-z,pack-relative-relocs".to_string();
+    // let mut rustflags = "-Copt-level=3 -Csymbol-mangling-version=v0 -Zunstable-options -Cdebuginfo=0 -Cpanic=immediate-abort -Zfmt-debug=none -Zlocation-detail=none -Clink-args=-fuse-ld=lld -Clink-args=-Wl,--icf=all,-z,pack-relative-relocs".to_string();
+    let mut rustflags = "-Copt-level=3 -Csymbol-mangling-version=v0 -Zunstable-options -Cdebuginfo=0 -Cpanic=immediate-abort -Zfmt-debug=none -Zlocation-detail=none".to_string();
     if args.native {
         rustflags.push_str(" -Ctarget-cpu=native");
     }
