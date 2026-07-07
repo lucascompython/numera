@@ -73,7 +73,7 @@ jobs:
           vcpkgGitCommitId: "cae2989df743645fb2510971b7a45febd9a2c361"
 
       - name: Install OpenCV via vcpkg
-        run: vcpkg install opencv4[core,imgproc,imgcodecs,photo,calib3d,features2d,jpeg,png,tiff,webp]:x64-windows
+        run: vcpkg install opencv4[core,imgproc,imgcodecs,calib3d,features2d,jpeg,png,tiff,webp]:x64-windows
         shell: pwsh
         env:
           VCPKG_BINARY_SOURCES: "clear"
