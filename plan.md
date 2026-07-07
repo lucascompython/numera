@@ -507,3 +507,7 @@ Minimum useful slice:
 5. Start the robust event sorter from the autonomous window.
 6. Show progress and final counts in the existing autonomous progress UI.
 7. Route uncertain images to review instead of assigning them.
+
+## Other TODOs
+
+- [ ] checkout opencv v5.0
