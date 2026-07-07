@@ -40,7 +40,8 @@ jobs:
             libvulkan-dev \
             libssl-dev \
             libclang-dev \
-            clang
+            clang \
+            nasm
 
       # libxkbcommon-wayland-dev \
       - uses: Swatinem/rust-cache@v2
