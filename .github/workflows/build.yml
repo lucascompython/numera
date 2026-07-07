@@ -85,6 +85,10 @@ jobs:
         env:
           VCPKG_ROOT: ${{ runner.workspace }}/vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows
+          OpenCV_DIR: ${{ runner.workspace }}/vcpkg/installed/x64-windows/share/opencv
+          OPENCV_LINK_LIBS: opencv_core4,opencv_imgproc4,opencv_imgcodecs4,opencv_photo4,opencv_calib3d4,opencv_features2d4
+          OPENCV_LINK_PATHS: ${{ runner.workspace }}/vcpkg/installed/x64-windows/lib
+          OPENCV_INCLUDE_PATHS: ${{ runner.workspace }}/vcpkg/installed/x64-windows/include
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
