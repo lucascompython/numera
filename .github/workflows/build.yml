@@ -100,7 +100,7 @@ jobs:
 
       - name: Install dependencies via Homebrew
         run: |
-          brew install opencv turbojpeg pkg-config cmake
+          brew install opencv jpeg-turbo pkg-config cmake
 
       - uses: Swatinem/rust-cache@v2
 
