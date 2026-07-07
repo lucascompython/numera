@@ -75,6 +75,8 @@ jobs:
         run: |
           vcpkg install opencv4[jpeg,world]:x64-windows
         shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: "clear"
 
       - uses: Swatinem/rust-cache@v2
 
