@@ -18,6 +18,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: x86_64-unknown-linux-gnu
+          components: rust-src
 
       - name: Install system dependencies
         run: |
@@ -63,6 +64,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: x86_64-pc-windows-msvc
+          components: rust-src
 
       - name: Install vcpkg
         uses: lukka/run-vcpkg@v11
@@ -97,6 +99,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: aarch64-apple-darwin
+          components: rust-src
 
       - name: Install dependencies via Homebrew
         run: |
