@@ -1,0 +1,118 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Build (x86_64 Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libopencv-dev \
+            libturbojpeg0-dev \
+            libfontconfig1-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-render0-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libxkbcommon-x11-dev \
+            libxkbcommon-wayland-dev \
+            libvulkan-dev \
+            libssl-dev \
+            libclang-dev \
+            clang
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo xtask speed
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: numera-linux-x86_64
+          path: target/x86_64-unknown-linux-gnu/release/numera
+
+  build-windows:
+    name: Build (x86_64 Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install vcpkg
+        uses: lukka/run-vcpkg@v11
+        # with:
+        #   vcpkgGitCommitId: "a42af01b72c28a8e1d7b48107b33e4f286a55ef6"
+
+      - name: Install dependencies via vcpkg
+        run: |
+          vcpkg install opencv4[turbojpeg,world]:x64-windows
+        shell: pwsh
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo xtask speed
+        env:
+          VCPKG_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}
+          VCPKG_DEFAULT_TRIPLET: x64-windows
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: numera-windows-x86_64
+          path: target/x86_64-pc-windows-msvc/release/numera.exe
+
+  build-macos:
+    name: Build (aarch64 macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install dependencies via Homebrew
+        run: |
+          brew install opencv turbojpeg pkg-config cmake
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo xtask speed
+        env:
+          OPENCV_LINK_LIBS: opencv_core,opencv_imgproc,opencv_imgcodecs,opencv_photo,opencv_calib3d,opencv_features2d
+          OPENCV_LINK_PATHS: /opt/homebrew/lib
+          OPENCV_INCLUDE_PATHS: /opt/homebrew/include/opencv4
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: numera-macos-aarch64
+          path: target/aarch64-apple-darwin/release/numera
