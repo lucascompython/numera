@@ -36,12 +36,12 @@ jobs:
             libxkbcommon-dev \
             libwayland-dev \
             libxkbcommon-x11-dev \
-            libxkbcommon-wayland-dev \
             libvulkan-dev \
             libssl-dev \
             libclang-dev \
             clang
 
+      # libxkbcommon-wayland-dev \
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
