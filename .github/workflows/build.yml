@@ -67,25 +67,21 @@ jobs:
           targets: x86_64-pc-windows-msvc
           components: rust-src
 
-      - name: Install vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: "a42af01b72c28a8e1d7b48107b33e4f286a55ef6"
-
-      - name: Install dependencies via vcpkg
+      - name: Download OpenCV
         run: |
-          vcpkg install opencv4[jpeg,world]:x64-windows
+          curl -L -o opencv.exe "https://github.com/opencv/opencv/releases/download/4.13.0/opencv-4.13.0.exe"
+          7z x opencv.exe -oC:\
         shell: pwsh
-        env:
-          VCPKG_BINARY_SOURCES: "clear"
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo xtask speed
         env:
-          VCPKG_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}
-          VCPKG_DEFAULT_TRIPLET: x64-windows
+          OPENCV_LINK_LIBS: opencv_core4130,opencv_imgproc4130,opencv_imgcodecs4130,opencv_photo4130,opencv_calib3d4130,opencv_features2d4130
+          OPENCV_LINK_PATHS: C:\opencv\build\x64\vc16\lib
+          OPENCV_INCLUDE_PATHS: C:\opencv\build\include
+
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
