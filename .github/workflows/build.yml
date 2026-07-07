@@ -69,7 +69,7 @@ jobs:
 
       - name: Download OpenCV
         run: |
-          curl -L -o opencv.exe "https://github.com/opencv/opencv/releases/download/4.13.0/opencv-4.13.0.exe"
+          curl -L -o opencv.exe "https://github.com/opencv/opencv/releases/download/4.13.0/opencv-4.13.0-windows.exe"
           7z x opencv.exe -oC:\
         shell: pwsh
 
