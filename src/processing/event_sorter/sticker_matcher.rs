@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
-use opencv::calib3d;
-use opencv::core::{DMatch, KeyPoint, Mat, NORM_HAMMING, Point2f, Size, Vector};
+use anyhow::{anyhow, Context, Result};
+use opencv::core::{DMatch, KeyPoint, Mat, Point2f, Size, Vector, NORM_HAMMING};
 use opencv::features2d::{self, Feature2DTrait};
 use opencv::imgcodecs;
 use opencv::imgproc;
@@ -35,11 +34,20 @@ pub struct StickerDetection {
 
 impl StickerMatcher {
     pub fn new(event: EventConfig) -> Result<Self> {
-        let template_path = event.sticker_template_path.to_string_lossy();
-        let template_color = imgcodecs::imread(&template_path, imgcodecs::IMREAD_COLOR)
-            .with_context(|| format!("failed to load sticker template {}", template_path))?;
+        let template_color =
+            imgcodecs::imread(&event.sticker_template_path, imgcodecs::IMREAD_COLOR).with_context(
+                || {
+                    format!(
+                        "failed to load sticker template {}",
+                        event.sticker_template_path.display()
+                    )
+                },
+            )?;
         if template_color.empty() {
-            return Err(anyhow!("sticker template is empty: {}", template_path));
+            return Err(anyhow!(
+                "sticker template is empty: {}",
+                event.sticker_template_path.display()
+            ));
         }
 
         let mut template_gray = Mat::default();
@@ -71,8 +79,7 @@ impl StickerMatcher {
     }
 
     pub fn detect(&mut self, image_path: &Path) -> Result<StickerDetection> {
-        let image_path_str = image_path.to_string_lossy();
-        let image_color = imgcodecs::imread(&image_path_str, imgcodecs::IMREAD_COLOR)
+        let image_color = imgcodecs::imread(image_path, imgcodecs::IMREAD_COLOR)
             .with_context(|| format!("failed to load image {}", image_path.display()))?;
         if image_color.empty() {
             return Err(anyhow!("image is empty: {}", image_path.display()));
@@ -143,13 +150,25 @@ impl StickerMatcher {
         }
 
         let mut inlier_mask = Mat::default();
-        let homography = calib3d::find_homography(
-            &image_points,
-            &template_points,
-            &mut inlier_mask,
-            calib3d::RANSAC,
-            4.0,
-        )?;
+        let homography = opencv::opencv_has_module_geometry! {
+            {
+                opencv::geometry::find_homography_1(
+                    &image_points,
+                    &template_points,
+                    &mut inlier_mask,
+                    opencv::geometry::RANSAC,
+                    4.0,
+                )
+            } else {
+                opencv::calib3d::find_homography(
+                    &image_points,
+                    &template_points,
+                    &mut inlier_mask,
+                    opencv::calib3d::RANSAC,
+                    4.0,
+                )
+            }
+        }?;
 
         if homography.empty() {
             return Ok(self.not_found(

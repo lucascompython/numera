@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use image::DynamicImage;
 use opencv::core::{Mat, Size, Vector};
 use opencv::imgcodecs;
@@ -57,7 +57,7 @@ pub fn write_debug_image(path: &std::path::Path, mat: &Mat) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if !imgcodecs::imwrite_def(&path.to_string_lossy(), mat)? {
+    if !imgcodecs::imwrite_def(path, mat)? {
         return Err(anyhow!("OpenCV failed to write {}", path.display()));
     }
     Ok(())
@@ -65,5 +65,9 @@ pub fn write_debug_image(path: &std::path::Path, mat: &Mat) -> Result<()> {
 
 fn adaptive_block_size(width: i32, height: i32) -> i32 {
     let base = (width.min(height) / 8).clamp(11, 41);
-    if base % 2 == 0 { base + 1 } else { base }
+    if base % 2 == 0 {
+        base + 1
+    } else {
+        base
+    }
 }

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use opencv::core::{Mat, Rect, Size, Vec3b};
 use opencv::imgcodecs;
 use opencv::imgproc;
@@ -387,8 +387,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn load_color_image(image_path: &Path) -> Result<Mat> {
-    let image_path_str = image_path.to_string_lossy();
-    let image = imgcodecs::imread(&image_path_str, imgcodecs::IMREAD_COLOR)?;
+    let image = imgcodecs::imread(image_path, imgcodecs::IMREAD_COLOR)?;
     if image.empty() {
         bail!("image is empty: {}", image_path.display());
     }
@@ -650,7 +649,7 @@ fn l2_normalize(values: &mut [f32]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{VisualEmbeddingBackend, VisualEmbeddingConfig, cosine_similarity};
+    use super::{cosine_similarity, VisualEmbeddingBackend, VisualEmbeddingConfig};
 
     #[test]
     fn cosine_similarity_requires_same_dimensions() {

@@ -7,7 +7,7 @@ use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerSta
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::progress::Progress;
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::scroll::{Scrollbar, ScrollbarShow};
+use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::select::{SelectEvent, SelectItem, SelectState};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use gpui_component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
@@ -1713,7 +1713,7 @@ impl App {
                 div().absolute().top_0().right_0().bottom_0().child(
                     Scrollbar::vertical(&self.settings_scroll_handle)
                         .id("settings-scrollbar")
-                        .scrollbar_show(ScrollbarShow::Always),
+                        .mode(ScrollbarMode::Always),
                 ),
             )
     }
